@@ -1,34 +1,162 @@
-# ⚔️ The Arbiter
+# ⚔️ The Arbiter — Multi-Agent Consensus Engine for LLM Reasoning
 
-I built this because I was tired of getting "okay-ish" answers from just one AI. Sometimes you need a second opinion, or in this case, a three-way technical debate to actually get something solid.
+> Stop trusting a single AI. Build systems that **challenge themselves until they’re right.**
 
-**The Arbiter** is a multi-agent setup where **GPT-4o**, **Gemini 2.5**, and **Llama 3.3 (via Groq)** act as a board of experts. They won't stop until they reach a consensus on whatever challenge you throw at them.
+---
 
-### 🧠 The Board of Experts
-Instead of one prompt, you’re hiring a specialized team:
-* **The Architect (GPT-4o):** Does the heavy lifting and builds the initial solution.
-* **The Tech Critic (Gemini 2.5):** Tries to break the solution by finding technical flaws.
-* **The Logic Critic (Llama 3.3 @ Groq):** Makes sure the reasoning is airtight and efficient.
+## 🚀 Overview
 
-If the critics find a hole in the plan, the Architect has to go back to the drawing board. They keep at it until everyone agrees it's a "win".
+The Arbiter is a multi-agent LLM system designed to **improve answer quality through structured debate and consensus**.
 
-### ⚡ Cool stuff I added:
-* **Cost Tracker:** A real-time cent-counter so you know exactly what you're spending on APIs.
-* **Smart Memory:** The agents remember previous critiques, so they actually improve instead of going in circles.
-* **Neon Dark Mode:** Built with Streamlit, because nobody likes a boring white UI.
-* **One-Click PDF:** Grab the final, agreed-upon solution as a clean document.
+Instead of relying on a single model, The Arbiter orchestrates a board of specialized AI agents that:
 
-### 🛠️ How to run it
-1. **Clone it:**
-   ```bash
-   git clone [https://github.com/lucaomul/TheArbiter.git](https://github.com/lucaomul/TheArbiter.git)
-   cd TheArbiter
+* generate solutions
+* critically evaluate them
+* iteratively refine outputs until a consensus is reached
 
-2. **Setup:**
-Install what's needed: pip install -r requirements.txt
+This approach reduces shallow reasoning and increases robustness in complex problem-solving scenarios.
 
-3. **Secrets:**
-Pop your API keys into a .env file (don't worry, it's ignored by Git).
+---
 
-4. **Launch:**
+## 🧠 System Architecture
+
+The system is built around a **role-based multi-agent loop**:
+
+* **Architect (GPT-4o)**
+  Generates the initial solution and iterates based on feedback
+
+* **Tech Critic (Gemini 2.5)**
+  Identifies technical flaws, edge cases, and implementation gaps
+
+* **Logic Critic (Llama 3.3 via Groq)**
+  Validates reasoning, efficiency, and logical consistency
+
+### 🔁 Iterative Consensus Loop
+
+1. Architect generates a solution
+2. Critics evaluate and challenge it
+3. Feedback is aggregated
+4. Architect refines the solution
+5. Loop continues until consensus criteria are met
+
+---
+
+## ⚙️ Key Features
+
+* **Multi-Agent Orchestration**
+  Structured collaboration between independent LLMs
+
+* **Iterative Refinement Loop**
+  Solutions are improved across multiple passes instead of one-shot responses
+
+* **Smart Memory**
+  Agents retain previous critiques, preventing repeated mistakes
+
+* **Cost Tracking System**
+  Real-time API cost monitoring for full transparency and control
+
+* **Source-Agnostic Design**
+  Easily extendable to additional models or roles
+
+* **One-Click PDF Export**
+  Generate clean, shareable outputs of final solutions
+
+---
+
+## 📊 Why It Matters
+
+Single-model outputs often:
+
+* miss edge cases
+* hallucinate details
+* provide shallow reasoning
+
+The Arbiter addresses this by introducing:
+
+* **adversarial validation**
+* **multi-perspective reasoning**
+* **iterative improvement cycles**
+
+Result: more reliable and production-ready outputs.
+
+---
+
+## 🧪 Example Use Cases
+
+* Complex technical problem solving
+* System design validation
+* Code review & debugging
+* Research synthesis
+* Decision support systems
+
+---
+
+## 🛠️ Tech Stack
+
+* **Python**
+* **OpenAI API (GPT-4o)**
+* **Google Gemini 2.5**
+* **Llama 3.3 via Groq**
+* **Streamlit (UI Layer)**
+* **REST API integrations**
+
+---
+
+## ⚡ Getting Started
+
+```bash
+git clone https://github.com/lucaomul/TheArbiter.git
+cd TheArbiter
+pip install -r requirements.txt
+```
+
+### 🔐 Setup
+
+Create a `.env` file and add your API keys:
+
+```
+OPENAI_API_KEY=...
+GEMINI_API_KEY=...
+GROQ_API_KEY=...
+```
+
+### ▶️ Run the app
+
+```bash
 streamlit run app.py
+```
+
+---
+
+## 📈 Future Improvements
+
+* Consensus scoring (semantic agreement / voting system)
+* Latency optimization across agent loops
+* Cost-performance tuning strategies
+* Persistent long-term memory (vector DB integration)
+* Evaluation benchmarks vs single-model baselines
+
+---
+
+## 💡 Design Philosophy
+
+> Build AI systems that **don’t trust themselves blindly**.
+
+The Arbiter is designed with a simple principle:
+**better answers come from structured disagreement, not blind generation.**
+
+---
+
+## 👤 Author
+
+**Luca Craciun**
+AI Automation Engineer
+
+GitHub: https://github.com/lucaomul
+LinkedIn: https://www.linkedin.com/in/gabriel-luca-craciun-25ba95295
+
+---
+
+## ⭐ If you find this useful
+
+Give it a star — or better yet, fork it and improve the system.
