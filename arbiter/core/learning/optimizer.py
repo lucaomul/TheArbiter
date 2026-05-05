@@ -10,6 +10,26 @@ from arbiter.models.state import ArbiterState
 class LearningOptimizer:
 
     def optimize(self, state: ArbiterState) -> dict:
+        if getattr(state, "stable_mode", False):
+            history = state.iteration_history
+            if not history:
+                return {"mode": "stable"}
+            latest = history[-1]
+            recommendations = {"mode": "stable"}
+            if latest["tech"] < 6:
+                recommendations["focus"] = "tech_repair"
+                recommendations["hint"] = (
+                    f"Stable mode active. Keep the same selected model family and fix the technical defect set: {latest['tech_critique']}"
+                )
+            elif latest["logic"] < 7:
+                recommendations["focus"] = "logic_repair"
+                recommendations["hint"] = (
+                    f"Stable mode active. Keep the same selected model family and address this logic gap: {latest['logic_critique']}"
+                )
+            else:
+                recommendations["focus"] = "polish"
+            return recommendations
+
         history = state.iteration_history
         if not history:
             return {}

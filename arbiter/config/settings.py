@@ -22,7 +22,7 @@ class Settings:
     cheap_model_threshold: float = 6.0
 
     # Exploration rate for model selector (0-1)
-    exploration_rate: float = 0.1
+    exploration_rate: float = 0.0
 
     # Validation / repair
     enable_preflight: bool = True

@@ -115,6 +115,8 @@ with st.sidebar:
     st.markdown("<h1 style='color:#00ffa3;font-size:1.5rem;'>🧪 TEST BENCH</h1>", unsafe_allow_html=True)
     st.caption("Use this sandbox to test prompts, models, and review behavior without changing the production UI flow.")
     task_mode = st.selectbox("Task Mode", list(TASK_PROFILES.keys()), index=0)
+    provider_lock = st.selectbox("Provider Lock", ["mixed", "groq", "gemini", "openai", "ollama"], index=0)
+    stable_mode = st.checkbox("Stable Mode", value=True)
     use_ollama_test_mode = st.checkbox("Ollama Test Mode", value=False)
     if use_ollama_test_mode:
         st.caption("Prefix-free local model names will be wrapped as `ollama:<model>` automatically.")
@@ -161,6 +163,7 @@ with st.sidebar:
     max_iterations = st.number_input("Max Iterations", 1, 8, 3) if auto_mode else 1
 
     selector = get_model_selector()
+    selector.set_provider_lock("" if provider_lock == "mixed" else provider_lock)
     selector.set_override("Architect", architect_model)
     selector.set_override("Auditor", auditor_model)
     selector.set_override("Tech Critic", tech_model)
@@ -184,6 +187,7 @@ if st.button("Run Sandbox"):
             auto_mode=auto_mode,
             target_score=float(target_score),
             max_iterations=int(max_iterations),
+            stable_mode=stable_mode,
         )
         result = orchestrator.run(
             user_input=task,

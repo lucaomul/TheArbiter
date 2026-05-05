@@ -63,6 +63,12 @@ class MemoryStore:
         "does", "did", "not", "are", "was", "were", "been", "being", "them", "they",
         "build", "create", "write", "make", "solution", "task", "need",
     }
+    LIFECYCLE_PRIORITY = {
+        "active": 0,
+        "caution": 1,
+        "conflicted": 2,
+        "obsolete": 3,
+    }
 
     def __init__(self):
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -104,6 +110,11 @@ class MemoryStore:
     def _append_entry(self, entry: Dict):
         with JSONL_PATH.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
+
+    def _persist_entries(self):
+        with JSONL_PATH.open("w", encoding="utf-8") as handle:
+            for entry in self._entries[-500:]:
+                handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
     def _init_chroma(self):
         if chromadb is None:
@@ -162,6 +173,68 @@ class MemoryStore:
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _memory_lifecycle(memory_status: str, validity_status: str, score_status: str) -> str:
+        if memory_status == "REJECT":
+            return "obsolete"
+        if memory_status == "CONFLICT":
+            return "conflicted"
+        if validity_status == "VALID" and score_status == "final" and memory_status == "ACCEPT":
+            return "active"
+        return "caution"
+
+    def _entry_similarity(self, current_task_tokens: set, current_issue_tokens: set, entry: Dict, task_mode: str) -> float:
+        entry_task_tokens = set(entry.get("task_tokens", []))
+        entry_issue_tokens = set(entry.get("issue_tokens", []))
+        task_overlap = self._overlap_score(current_task_tokens, entry_task_tokens)
+        issue_overlap = self._overlap_score(current_issue_tokens, entry_issue_tokens)
+        mode_bonus = 0.15 if entry.get("task_mode") == task_mode else 0.0
+        return (task_overlap * 0.45) + (issue_overlap * 0.40) + mode_bonus
+
+    def _apply_versioning(self, entry: Dict):
+        new_task_tokens = set(entry.get("task_tokens", []))
+        new_issue_tokens = set(entry.get("issue_tokens", []))
+        new_score = float(entry.get("avg_score", 0.0) or 0.0)
+        new_is_strong = (
+            entry.get("validity_status") == "VALID"
+            and entry.get("score_status") == "final"
+            and entry.get("memory_lifecycle") == "active"
+        )
+
+        updated = False
+        for existing in self._entries:
+            if existing.get("memory_id") == entry.get("memory_id"):
+                continue
+            if existing.get("memory_lifecycle") == "obsolete":
+                continue
+            similarity = self._entry_similarity(new_task_tokens, new_issue_tokens, existing, entry.get("task_mode", ""))
+            if similarity < 0.72:
+                continue
+
+            existing_score = float(existing.get("avg_score", 0.0) or 0.0)
+            existing_is_strong = (
+                existing.get("validity_status") == "VALID"
+                and existing.get("score_status") == "final"
+                and existing.get("memory_lifecycle") == "active"
+            )
+
+            if new_is_strong and (
+                not existing_is_strong
+                or new_score >= (existing_score + 0.5)
+            ):
+                existing["memory_lifecycle"] = "obsolete"
+                existing["superseded_by"] = entry.get("memory_id")
+                existing["superseded_at"] = entry.get("timestamp_utc")
+                updated = True
+            elif existing_is_strong and entry.get("memory_lifecycle") == "conflicted":
+                existing.setdefault("conflicted_by", [])
+                if entry.get("memory_id") not in existing["conflicted_by"]:
+                    existing["conflicted_by"].append(entry.get("memory_id"))
+                    updated = True
+
+        if updated:
+            self._persist_entries()
 
     def evaluate_candidate(
         self,
@@ -301,6 +374,7 @@ class MemoryStore:
             "tech_model": tech_model,
             "logic_model": logic_model,
             "memory_status": verdict["status"],
+            "memory_lifecycle": self._memory_lifecycle(verdict["status"], validity_status, score_status),
             "consensus_score": verdict["consensus_score"],
             "memory_reasons": verdict["reasons"],
             "related_memory_ids": verdict["related_memory_ids"],
@@ -311,12 +385,16 @@ class MemoryStore:
                 "iteration": iteration,
             },
             "supersedes": None,
+            "superseded_by": None,
+            "superseded_at": None,
+            "conflicted_by": [],
         }
         if verdict["status"] == "REJECT":
             return entry
         self._entries.append(entry)
         self._entries = self._entries[-500:]
         self._append_entry(entry)
+        self._apply_versioning(entry)
         self._store_in_chroma(entry)
         return entry
 
@@ -328,17 +406,32 @@ class MemoryStore:
 
         ranked = []
         for entry in self._entries:
+            if entry.get("memory_lifecycle", "active") == "obsolete":
+                continue
             entry_task_tokens = set(entry.get("task_tokens", []))
             entry_issue_tokens = set(entry.get("issue_tokens", []))
             mode_bonus = 0.25 if entry.get("task_mode") == task_mode else 0.0
             task_score = self._overlap_score(task_tokens, entry_task_tokens)
             issue_score = self._overlap_score(unresolved_tokens, entry_issue_tokens)
             quality_bonus = min(float(entry.get("avg_score", 0.0)) / 10.0, 1.0) * 0.15
-            total = mode_bonus + task_score + issue_score + quality_bonus
+            lifecycle = entry.get("memory_lifecycle", "caution")
+            lifecycle_bonus = {
+                "active": 0.15,
+                "caution": 0.05,
+                "conflicted": -0.10,
+                "obsolete": -1.0,
+            }.get(lifecycle, 0.0)
+            total = mode_bonus + task_score + issue_score + quality_bonus + lifecycle_bonus
             if total > 0.2:
                 ranked.append((total, entry))
 
-        ranked.sort(key=lambda item: item[0], reverse=True)
+        ranked.sort(
+            key=lambda item: (
+                -item[0],
+                self.LIFECYCLE_PRIORITY.get(item[1].get("memory_lifecycle", "caution"), 9),
+                -float(item[1].get("avg_score", 0.0) or 0.0),
+            )
+        )
         return [entry for _, entry in ranked[:limit]]
 
     def _chroma_retrieval(self, task_mode: str, task_text: str, unresolved_issues: Optional[dict], limit: int) -> List[Dict]:
@@ -379,7 +472,7 @@ class MemoryStore:
                 continue
             seen.add(item_id)
             entry = by_id.get(item_id)
-            if entry:
+            if entry and entry.get("memory_lifecycle", "active") != "obsolete":
                 retrieved.append(entry)
             if len(retrieved) >= limit:
                 break
@@ -399,7 +492,10 @@ class MemoryStore:
             merged.append(entry)
             if len(merged) >= limit:
                 break
-        return merged
+        strong = [entry for entry in merged if entry.get("memory_lifecycle", "caution") in {"active", "caution"}]
+        if strong:
+            return strong[:limit]
+        return merged[:limit]
 
     def summarize_relevant(self, task_mode: str, task_text: str, unresolved_issues: dict = None, limit: int = 3) -> str:
         relevant = self.retrieve_relevant(task_mode, task_text, unresolved_issues=unresolved_issues, limit=limit)
@@ -411,9 +507,13 @@ class MemoryStore:
             "Use these as lessons, not as something to copy blindly.",
         ]
         for idx, item in enumerate(relevant, start=1):
+            lifecycle = str(item.get("memory_lifecycle", "caution")).upper()
             lines.append(
-                f"{idx}. Prior {item.get('task_mode', 'Unknown')} run, avg {float(item.get('avg_score', 0.0)):.1f}/10, architect {item.get('architect_model', 'unknown')}."
+                f"{idx}. [{lifecycle}] Prior {item.get('task_mode', 'Unknown')} run, avg {float(item.get('avg_score', 0.0)):.1f}/10, architect {item.get('architect_model', 'unknown')}."
             )
+            if item.get("memory_reasons"):
+                lines.append("   Trust notes:")
+                lines.extend([f"   - {reason}" for reason in item.get("memory_reasons", [])[:2]])
             if item.get("preflight_issues"):
                 lines.append("   Preflight issues:")
                 lines.extend([f"   - {issue}" for issue in item["preflight_issues"][:3]])
@@ -429,13 +529,38 @@ class MemoryStore:
                 lines.extend([f"   - {step}" for step in repair_steps])
         return "\n".join(lines)
 
+    def summarize_for_architect(self, task_mode: str, task_text: str, unresolved_issues: dict = None, limit: int = 3) -> str:
+        relevant = self.retrieve_relevant(task_mode, task_text, unresolved_issues=unresolved_issues, limit=limit)
+        if not relevant:
+            return ""
+
+        lines = [
+            "RETRIEVED LEARNING CONTEXT:",
+            "Use these prior cases as reusable patterns and warnings. Reuse the lessons, not the exact text.",
+        ]
+        for idx, item in enumerate(relevant, start=1):
+            lines.append(
+                f"{idx}. State={item.get('memory_lifecycle', 'caution').upper()} | Avg={float(item.get('avg_score', 0.0)):.1f}/10 | Mode={item.get('task_mode', 'Unknown')}"
+            )
+            repairs = (item.get("tech_repair_contract", []) + item.get("logic_repair_contract", []))[:3]
+            if repairs:
+                lines.append("   Reusable repair patterns:")
+                lines.extend([f"   - {step}" for step in repairs])
+            failures = (item.get("preflight_issues", []) + item.get("tech_issues", []) + item.get("logic_issues", []))[:3]
+            if failures:
+                lines.append("   Avoid repeating:")
+                lines.extend([f"   - {issue}" for issue in failures])
+        return "\n".join(lines)
+
     def stats(self) -> dict:
         modes = Counter(entry.get("task_mode", "Unknown") for entry in self._entries)
         memory_status = Counter(entry.get("memory_status", "ACCEPT") for entry in self._entries)
+        lifecycle = Counter(entry.get("memory_lifecycle", "caution") for entry in self._entries)
         return {
             "count": len(self._entries),
             "task_modes": dict(modes),
             "memory_status": dict(memory_status),
+            "memory_lifecycle": dict(lifecycle),
             "backend": self._backend,
             "path": str(MEMORY_DIR),
         }

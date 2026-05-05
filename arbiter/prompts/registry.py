@@ -156,11 +156,11 @@ class PromptRegistry:
         if manual_override:
             history_lines.append(f"USER MANUAL INSTRUCTION: {manual_override}")
 
-        memory_summary = self.memory.summarize_relevant(
+        memory_summary = self.memory.summarize_for_architect(
             self.task_mode,
             state.current_task or state.user_input,
             unresolved_issues=state.unresolved_issues,
-            limit=2,
+            limit=3,
         )
         if memory_summary:
             history_lines.append(memory_summary)

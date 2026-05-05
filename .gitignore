@@ -5,4 +5,4 @@ __pycache__/
 *.webm
 *.pdf
 .DS_Store
-
+.arbiter_memory/

@@ -37,7 +37,7 @@ class BaseAgent:
             system_prompt=self.system_prompt,
             user_prompt=full_prompt,
             force_json=force_json and self.provider == "openai",
-            temperature=0.3 if self.name != "Architect" else 0.7,
+            temperature=0.1 if self.name != "Architect" else 0.4,
         )
 
         if self.is_cacheable_response(response):

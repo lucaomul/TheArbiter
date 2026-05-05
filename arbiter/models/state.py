@@ -58,6 +58,7 @@ class ArbiterState:
     last_avg_score: float = 0.0
     last_tech_score: Optional[int] = None
     rewrite_mode: bool = False
+    stable_mode: bool = False
     pending_questions: list[str] = field(default_factory=list)
 
     # History

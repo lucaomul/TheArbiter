@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from arbiter.core.orchestrator import ArbiterOrchestrator
 from arbiter.models.state import ArbiterState
 from arbiter.config.settings import SETTINGS, TASK_PROFILES, PRICES
+from arbiter.infra.cache import get_cache
 from arbiter.infra.memory_store import get_memory_store
 from arbiter.app.ui_styles import UI_CSS
 
@@ -60,6 +61,12 @@ defaults = {
     "latest_janitor_report": {},
     "latest_result_status": "IDLE",
     "run_id": "",
+    "retry_override": "",
+    "audit_status": "idle",
+    "provider_lock": "groq",
+    "stable_mode": True,
+    "manual_feedback_enabled": False,
+    "manual_feedback_text": "",
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -70,6 +77,115 @@ st.markdown(UI_CSS, unsafe_allow_html=True)
 
 
 # ── Helpers ──────────────────────────────────────────────────
+def reset_run_state(keep_task_mode: bool = True):
+    preserved_task_mode = st.session_state.task_mode if keep_task_mode else defaults["task_mode"]
+    for key, value in defaults.items():
+        if key == "task_mode":
+            continue
+        if isinstance(value, dict):
+            st.session_state[key] = value.copy()
+        elif isinstance(value, list):
+            st.session_state[key] = list(value)
+        else:
+            st.session_state[key] = value
+    st.session_state.task_mode = preserved_task_mode
+    st.session_state.audit_status = "idle"
+
+
+def build_retry_context() -> str:
+    if not st.session_state.iteration_history:
+        return st.session_state.retry_override or ""
+
+    latest = st.session_state.iteration_history[-1]
+    lines = []
+    if st.session_state.retry_override:
+        lines.append(st.session_state.retry_override.strip())
+    if latest.get("preflight_issues"):
+        lines.append("PREVIOUS PREFLIGHT ISSUES:")
+        lines.extend(f"- {item}" for item in latest.get("preflight_issues", []))
+    if latest.get("janitor_summary"):
+        lines.append(f"JANITOR SUMMARY: {latest.get('janitor_summary')}")
+    if latest.get("janitor_repair_brief"):
+        lines.append("JANITOR REPAIR BRIEF:")
+        lines.extend(f"- {item}" for item in latest.get("janitor_repair_brief", []))
+    if st.session_state.current_solution:
+        snippet = str(st.session_state.current_solution).strip()
+        if len(snippet) > 1600:
+            snippet = snippet[:1600] + "\n[truncated previous solution snapshot]"
+        lines.append("LAST ATTEMPT SOLUTION SNAPSHOT:")
+        lines.append(snippet)
+    return "\n".join(line for line in lines if str(line).strip()).strip()
+
+
+def build_effective_manual_override() -> str:
+    janitor_context = build_retry_context()
+    manual_text = str(st.session_state.manual_feedback_text or "").strip()
+    if st.session_state.manual_feedback_enabled and manual_text:
+        if janitor_context:
+            return (
+                f"{janitor_context}\n\n"
+                "MANUAL FEEDBACK / PROJECT INSIGHTS:\n"
+                f"{manual_text}"
+            ).strip()
+        return (
+            "MANUAL FEEDBACK / PROJECT INSIGHTS:\n"
+            f"{manual_text}"
+        ).strip()
+    return janitor_context
+
+
+def format_retry_after(seconds) -> str:
+    try:
+        total = max(0, int(float(seconds)))
+    except Exception:
+        return ""
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def format_provider_error_message(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+
+    parsed = None
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+
+    if parsed and parsed.get("provider_error"):
+        provider = str(parsed.get("provider", "provider")).upper()
+        model = parsed.get("model") or "selected model"
+        error_type = parsed.get("error_type") or "provider_error"
+        retry_after = format_retry_after(parsed.get("retry_after_seconds"))
+        if error_type == "rate_limit":
+            suffix = f" Available again in about {retry_after}." if retry_after else ""
+            return f"{provider} rate limit reached for `{model}`.{suffix}"
+        if error_type == "model_decommissioned":
+            return f"{provider} reported that `{model}` is no longer supported."
+        critique = parsed.get("critique") or parsed.get("error") or text
+        return str(critique)
+
+    lower = text.lower()
+    if "rate limit reached for model" in lower and "please try again in" in lower:
+        model_match = re.search(r"model [`']?([^`' ]+)[`']?", text, re.IGNORECASE)
+        retry_match = re.search(r"please try again in ([0-9hms\.\s]+)", text, re.IGNORECASE)
+        provider = "Groq" if "groq" in lower else "Provider"
+        model = model_match.group(1) if model_match else "selected model"
+        retry = retry_match.group(1).strip().rstrip(".") if retry_match else ""
+        suffix = f" Available again in about {retry}." if retry else ""
+        return f"{provider} rate limit reached for `{model}`.{suffix}"
+
+    return text
+
+
 def detect_code_language(raw: str) -> str:
     text = html.unescape(str(raw)).strip()
     js_signals = [
@@ -258,8 +374,8 @@ def render_telemetry_panel():
         </div>
         <div class="telemetry-card">
             <div class="telemetry-label">ADAPTIVE STATE</div>
-            <div class="telemetry-value">{'REWRITE' if st.session_state.rewrite_mode else 'REFINE'}</div>
-            <div class="telemetry-meta">Preflight {st.session_state.preflight_events} · Repairs {st.session_state.repair_events}</div>
+            <div class="telemetry-value">{'STABLE' if st.session_state.stable_mode else ('REWRITE' if st.session_state.rewrite_mode else 'REFINE')}</div>
+            <div class="telemetry-meta">Provider {html.escape(st.session_state.provider_lock.upper())} · Preflight {st.session_state.preflight_events} · Repairs {st.session_state.repair_events}</div>
         </div>
         <div class="telemetry-card">
             <div class="telemetry-label">MEMORY</div>
@@ -278,8 +394,35 @@ def render_memory_panel():
     janitor_resolved = latest.get("janitor_resolved") or []
     janitor_pending = latest.get("janitor_pending") or []
     janitor_regressed = latest.get("janitor_regressed") or []
+    memory_status = str(latest.get("memory_status", "ACCEPT"))
+    memory_consensus = float(latest.get("memory_consensus_score", 0.0) or 0.0)
+    memory_reasons = latest.get("memory_reasons") or []
+    related_memory_ids = latest.get("related_memory_ids") or []
+    lifecycle_stats = st.session_state.memory_stats.get("memory_lifecycle", {}) or {}
+    active_count = int(lifecycle_stats.get("active", 0) or 0)
+    caution_count = int(lifecycle_stats.get("caution", 0) or 0)
+    conflicted_count = int(lifecycle_stats.get("conflicted", 0) or 0)
+    obsolete_count = int(lifecycle_stats.get("obsolete", 0) or 0)
 
     with st.expander("Working Memory", expanded=False):
+        top = st.columns(5)
+        top[0].metric("Current Entry", memory_status)
+        top[1].metric("Consensus", f"{memory_consensus:.2f}")
+        top[2].metric("Active", active_count)
+        top[3].metric("Caution", caution_count)
+        top[4].metric("Conflicted", conflicted_count)
+        if obsolete_count:
+            st.caption(f"Obsolete memories archived from active retrieval: {obsolete_count}")
+
+        if memory_reasons:
+            st.markdown("**Current Memory Trust Notes**")
+            for reason in memory_reasons:
+                st.markdown(f"- {reason}")
+
+        if related_memory_ids:
+            st.markdown("**Related Retrieved Memory IDs**")
+            st.caption(", ".join(related_memory_ids[:5]))
+
         cols = st.columns(3)
         sections = [
             (cols[0], "Resolved", janitor_resolved),
@@ -362,7 +505,7 @@ def render_review_panel():
             raw = str(critique or "")
             lower = raw.lower()
             if lower.startswith("llm call failed") or "api error:" in lower or "model_decommissioned" in lower:
-                provider_error_messages.append(raw)
+                provider_error_messages.append(format_provider_error_message(raw))
         if provider_error_messages:
             st.warning("Reviewer / provider error detected during this round.")
             render_list(provider_error_messages)
@@ -395,6 +538,22 @@ def render_review_panel():
         with cols[2]:
             st.markdown("**Repair Brief**")
             render_list(janitor["repair_brief"])
+
+        if validity_status in {"DIAGNOSTIC ONLY", "REVIEW DEGRADED", "PROVIDER LIMITED"}:
+            retry_override = "\n".join(
+                janitor.get("repair_brief", [])
+                or latest.get("preflight_issues", [])
+                or latest.get("tech_repair_contract", [])
+                or latest.get("logic_repair_contract", [])
+            )
+            st.session_state.retry_override = retry_override
+            st.info(
+                "Janitor will be used automatically as the default retry source on the next run. "
+                "If you want to add your own notes, use the Manual Feedback Checkpoint in the run panel."
+            )
+            if st.button("Open Retry Checkpoint", key="open_retry_checkpoint"):
+                st.session_state.step = "negotiation"
+                st.rerun()
 
     with st.expander("Tech Critic Details"):
         st.markdown(f"**Technical Audit:** {latest.get('tech_critique', 'No issues.')}")
@@ -460,6 +619,13 @@ with st.sidebar:
         list(TASK_PROFILES.keys()),
         index=list(TASK_PROFILES.keys()).index(st.session_state.task_mode),
     )
+    provider_lock_option = st.selectbox(
+        "Provider Lock",
+        ["groq", "gemini", "openai", "mixed"],
+        index=["groq", "gemini", "openai", "mixed"].index(st.session_state.provider_lock if st.session_state.provider_lock in {"groq", "gemini", "openai", "mixed"} else "groq"),
+    )
+    st.session_state.provider_lock = provider_lock_option
+    st.session_state.stable_mode = st.toggle("Stable Mode", value=st.session_state.stable_mode, help="Keeps the selected provider/model family fixed, disables exploration, and prevents hidden premium escalation.")
 
     st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;margin-top:12px;'>MODEL SELECTION</p>", unsafe_allow_html=True)
     p_mod       = st.selectbox("Architect Brain", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gpt-4o", "gpt-4o-mini"])
@@ -470,10 +636,13 @@ with st.sidebar:
     # Push model choices into selector overrides
     from arbiter.infra.model_selector import get_model_selector
     sel = get_model_selector()
+    sel.set_provider_lock("" if provider_lock_option == "mixed" else provider_lock_option)
     sel.set_override("Architect",    p_mod)
     sel.set_override("Auditor",      c_mod_audit)
     sel.set_override("Tech Critic",  c_mod_tech)
     sel.set_override("Logic Critic", c_mod_logic)
+    sel.set_override("Repair",       "llama-3.1-8b-instant")
+    sel.set_override("Janitor",      "llama-3.1-8b-instant")
 
     st.markdown("""
     <div style='background:rgba(255,170,0,0.05);border:1px solid rgba(255,170,0,0.2);
@@ -536,27 +705,32 @@ render_memory_panel()
 # STEP 1: Input
 # ════════════════════════════════════════════════
 if st.session_state.step == "input":
-    u_input = st.text_area(
-        "OVERRIDE COMMAND:",
-        placeholder="Describe your technical task in detail...",
-        height=150,
-    )
-    if st.button("⚡ INITIALIZE COGNITIVE LOOP"):
-        if u_input:
-            st.session_state.current_task  = u_input
-            st.session_state.step          = "audit"
-            st.rerun()
+    with st.form("arbiter_input_form", clear_on_submit=False):
+        u_input = st.text_area(
+            "OVERRIDE COMMAND:",
+            placeholder="Describe your technical task in detail...",
+            height=150,
+        )
+        submitted = st.form_submit_button("⚡ INITIALIZE COGNITIVE LOOP")
+    st.caption("Arbiter will either ask for missing context or confirm that the task is clear enough to proceed.")
+    if submitted and u_input:
+        reset_run_state(keep_task_mode=True)
+        st.session_state.current_task = u_input
+        st.session_state.step = "audit"
+        st.rerun()
 
 
 # ════════════════════════════════════════════════
 # STEP 2: Audit
 # ════════════════════════════════════════════════
 elif st.session_state.step == "audit":
+    get_cache().clear()
     with st.spinner("Auditor checking task clarity..."):
         orchestrator = ArbiterOrchestrator(
             task_mode=st.session_state.task_mode,
             auto_mode=False,       # single audit run
             max_iterations=0,      # don't iterate yet
+            stable_mode=st.session_state.stable_mode,
         )
         result = orchestrator.run(user_input=st.session_state.current_task)
 
@@ -571,16 +745,13 @@ elif st.session_state.step == "audit":
         st.session_state.model_usage = result.debug_info.get("model_usage", [])
 
     if result.debug_info.get("needs_clarification"):
-        questions = result.debug_info.get("questions", [])
-        q_html    = "<br>".join([f"• {q}" for q in questions])
-        st.session_state.messages.append({
-            "role":    "Auditor",
-            "content": f"<b style='color:#ffaa00;'>MISSING SPECIFICATIONS:</b><br><br>{q_html}",
-        })
-        st.session_state.pending_questions = questions
+        st.session_state.pending_questions = result.debug_info.get("questions", [])
+        st.session_state.audit_status = "needs_clarification"
         st.session_state.step = "clarification"
         st.rerun()
     else:
+        st.session_state.pending_questions = []
+        st.session_state.audit_status = "passed"
         st.session_state.step = "negotiation"
         st.rerun()
 
@@ -589,10 +760,17 @@ elif st.session_state.step == "audit":
 # STEP 3: Clarification
 # ════════════════════════════════════════════════
 elif st.session_state.step == "clarification":
-    ans = st.text_input("PROVIDE ADDITIONAL DATA:")
-    if st.button("RE-SYNCHRONIZE"):
-        st.session_state.current_task += f" | Additional context: {ans}"
-        st.session_state.step          = "negotiation"
+    if st.session_state.pending_questions:
+        st.info("Auditor needs a bit more context before the build starts.")
+        for question in st.session_state.pending_questions:
+            st.markdown(f"- {question}")
+    with st.form("arbiter_clarification_form", clear_on_submit=False):
+        ans = st.text_area("PROVIDE ADDITIONAL DATA:", height=120)
+        clarify_submitted = st.form_submit_button("RE-SYNCHRONIZE")
+    if clarify_submitted:
+        if ans.strip():
+            st.session_state.current_task += f" | Additional context: {ans.strip()}"
+        st.session_state.step = "negotiation"
         st.rerun()
 
 
@@ -600,6 +778,8 @@ elif st.session_state.step == "clarification":
 # STEP 4: Negotiation (main debate loop)
 # ════════════════════════════════════════════════
 elif st.session_state.step == "negotiation":
+    if st.session_state.audit_status == "passed":
+        st.success("Auditor check passed. The task is specific enough to proceed.")
     st.markdown(
         f"<p style='opacity:0.3;font-size:0.75rem;letter-spacing:1px;'>"
         f"CYCLE_INDEX: {st.session_state.iteration}</p>",
@@ -608,22 +788,47 @@ elif st.session_state.step == "negotiation":
 
     col_input, col_opt = st.columns([2, 1])
     with col_input:
-        manual_override = st.text_input(
-            "MANUAL FEEDBACK (Optional):",
-            placeholder="Inject manual instructions for this cycle...",
+        janitor_context = build_retry_context()
+        if janitor_context:
+            with st.expander("Janitor Retry Context", expanded=True):
+                st.caption("This is the default rerun brief. Arbiter will use it automatically on the next run.")
+                st.text_area(
+                    "Janitor Context",
+                    value=janitor_context,
+                    height=220,
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+
+        st.session_state.manual_feedback_enabled = st.checkbox(
+            "Add Manual Feedback Checkpoint",
+            value=st.session_state.manual_feedback_enabled,
+            help="Turn this on only when you want to inject personal instructions or extra project context.",
         )
+        if st.session_state.manual_feedback_enabled:
+            st.session_state.manual_feedback_text = st.text_area(
+                "Manual Feedback / Extra Project Context",
+                value=st.session_state.manual_feedback_text,
+                placeholder="Add personal feedback, constraints, product context, or extra instructions here...",
+                height=140,
+            )
+        else:
+            st.session_state.manual_feedback_text = ""
     with col_opt:
         auto_mode      = st.checkbox("AUTONOMOUS MODE", value=False)
         target_score   = st.slider("Target score",   6, 10, 8) if auto_mode else 8.0
         max_iterations = st.number_input("Max iterations", 1, 8, 5) if auto_mode else 1
 
     if st.button("🚀 EXECUTE COGNITIVE DEBATE"):
+        get_cache().clear()
+        manual_override = build_effective_manual_override()
         with st.spinner("Running intelligence pipeline..."):
             orchestrator = ArbiterOrchestrator(
                 task_mode=st.session_state.task_mode,
                 auto_mode=auto_mode,
                 target_score=float(target_score),
                 max_iterations=int(max_iterations),
+                stable_mode=st.session_state.stable_mode,
             )
             result = orchestrator.run(
                 user_input=st.session_state.current_task,
@@ -632,6 +837,7 @@ elif st.session_state.step == "negotiation":
             )
 
         sync_state_from_result(result)
+        st.session_state.retry_override = ""
         st.rerun()
 
     if st.session_state.iteration > 0:

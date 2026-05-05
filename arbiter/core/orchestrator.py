@@ -21,6 +21,7 @@ class ArbiterOrchestrator:
         target_score: float = 8.0,
         max_iterations: int = 5,
         auditor_model: str = "gemini-2.5-flash",
+        stable_mode: bool = False,
         on_iteration_complete=None,
     ):
         self.task_mode    = task_mode
@@ -28,6 +29,7 @@ class ArbiterOrchestrator:
         self.target_score = target_score
         self.max_iter     = max_iterations
         self.auditor_model = auditor_model
+        self.stable_mode = stable_mode
         self.on_iteration_complete = on_iteration_complete
 
     def run(
@@ -41,7 +43,7 @@ class ArbiterOrchestrator:
         runner = AgentRunner(registry)
 
         # ── 1. Build state ────────────────────────────────────
-        state            = ArbiterState(user_input=user_input, task_mode=self.task_mode)
+        state            = ArbiterState(user_input=user_input, task_mode=self.task_mode, stable_mode=self.stable_mode)
         state.current_task = registry.build_task_payload(user_input)
 
         if clarification:
@@ -75,6 +77,7 @@ class ArbiterOrchestrator:
             auto_mode=self.auto_mode,
             target_score=self.target_score,
             max_iterations=self.max_iter,
+            stable_mode=self.stable_mode,
             on_iteration_complete=self.on_iteration_complete,
         )
 

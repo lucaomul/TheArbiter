@@ -27,6 +27,7 @@ class IterationEngine:
         auto_mode: bool = True,
         target_score: float = 8.0,
         max_iterations: int = 5,
+        stable_mode: bool = False,
         on_iteration_complete=None,
     ):
         self.runner    = AgentRunner(registry)
@@ -40,6 +41,7 @@ class IterationEngine:
         self.optimizer = LearningOptimizer()
         self.preflight = PreflightValidator()
         self.memory = get_memory_store()
+        self.stable_mode = stable_mode
         # Optional callback: on_iteration_complete(state, record) for UI updates
         self.on_iteration_complete = on_iteration_complete
 
@@ -54,7 +56,8 @@ class IterationEngine:
             # Context for model selector
             context = {
                 "last_tech_score": state.last_tech_score,
-                "force_quality":   recommendations.get("architect_model") == "gpt-4o",
+                "force_quality":   recommendations.get("architect_model") == "gpt-4o" and not self.stable_mode,
+                "stable_mode": self.stable_mode,
             }
 
             # ── 1. Build history string ──────────────────────
@@ -490,6 +493,7 @@ class IterationEngine:
             debug_info={
                 "stop_reason": reason,
                 "rewrite_mode": state.rewrite_mode,
+                "stable_mode": state.stable_mode,
                 "tech_stall_count": state.tech_stall_count,
                 "score_plateau_count": state.score_plateau_count,
                 "tech_regression_count": state.tech_regression_count,
