@@ -757,21 +757,21 @@ with st.sidebar:
     if not st.session_state.manual_model_selection:
         apply_model_preset(st.session_state.model_preset)
 
-    provider_lock_option = st.selectbox(
-        "Provider Lock",
-        ["groq", "gemini", "openai", "anthropic", "mixed"],
-        index=["groq", "gemini", "openai", "anthropic", "mixed"].index(st.session_state.provider_lock if st.session_state.provider_lock in {"groq", "gemini", "openai", "anthropic", "mixed"} else "groq"),
-        disabled=not st.session_state.manual_model_selection,
-    )
-    st.session_state.provider_lock = provider_lock_option
-    st.session_state.stable_mode = st.toggle(
-        "Stable Mode",
-        value=st.session_state.stable_mode,
-        help="Keeps the selected provider/model family fixed, disables exploration, and prevents hidden premium escalation.",
-        disabled=not st.session_state.manual_model_selection,
-    )
+    if st.session_state.manual_model_selection:
+        provider_lock_option = st.selectbox(
+            "Provider Lock",
+            ["groq", "gemini", "openai", "anthropic", "mixed"],
+            index=["groq", "gemini", "openai", "anthropic", "mixed"].index(st.session_state.provider_lock if st.session_state.provider_lock in {"groq", "gemini", "openai", "anthropic", "mixed"} else "groq"),
+        )
+        st.session_state.provider_lock = provider_lock_option
+        st.session_state.stable_mode = st.toggle(
+            "Stable Mode",
+            value=st.session_state.stable_mode,
+            help="Keeps the selected provider/model family fixed, disables exploration, and prevents hidden premium escalation.",
+        )
+    else:
+        provider_lock_option = st.session_state.provider_lock
 
-    st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;margin-top:12px;'>MODEL SELECTION</p>", unsafe_allow_html=True)
     role_order = ["Architect", "Auditor", "Tech Critic", "Logic Critic", "Janitor", "Repair"]
     role_labels = {
         "Architect": "Architect Brain",
@@ -782,23 +782,24 @@ with st.sidebar:
         "Repair": "Repair",
     }
     role_models = {}
-    for role in role_order:
-        options = get_available_models_for_role(role)
-        current_value = st.session_state.selected_models.get(role, options[0] if options else "")
-        if current_value not in options and options:
-            current_value = options[0]
-        chosen = st.selectbox(
-            role_labels[role],
-            options,
-            index=options.index(current_value) if options and current_value in options else 0,
-            key=f"role_model_{role}",
-            disabled=not st.session_state.manual_model_selection,
-        )
-        role_models[role] = chosen
     if st.session_state.manual_model_selection:
-        st.session_state.selected_models = role_models
+        st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;margin-top:12px;'>MODEL SELECTION</p>", unsafe_allow_html=True)
+        for role in role_order:
+            options = get_available_models_for_role(role)
+            current_value = st.session_state.selected_models.get(role, options[0] if options else "")
+            if current_value not in options and options:
+                current_value = options[0]
+            chosen = st.selectbox(
+                role_labels[role],
+                options,
+                index=options.index(current_value) if options and current_value in options else 0,
+                key=f"role_model_{role}",
+            )
+            role_models[role] = chosen
     else:
         role_models = dict(st.session_state.selected_models)
+    if st.session_state.manual_model_selection:
+        st.session_state.selected_models = role_models
 
     # Push model choices into selector overrides
     from arbiter.infra.model_selector import get_model_selector
