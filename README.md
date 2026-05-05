@@ -123,6 +123,44 @@ That makes it much easier to operate predictably under real cost constraints.
 
 ---
 
+## Expected efficiency gains
+
+Arbiter is built to improve more than answer quality. It is also designed to reduce wasted runtime, wasted review cycles, and wasted API spend.
+
+These are **directional architecture-level estimates**, not formal benchmark claims:
+
+- `~1 full critic round avoided`
+  on structurally broken outputs when preflight catches failures before the full review loop spends more money
+
+- `~1–2 noisy retry cycles reduced`
+  in drift-heavy runs when Janitor compresses multiple reviewer signals into one repair brief
+
+- `~lower review waste in failure-heavy workflows`
+  because invalid outputs can be blocked, repaired, downgraded, or stopped before they trigger repeated cross-agent churn
+
+- `~faster convergence on similar tasks`
+  when the Architect retrieves prior repair patterns, trusted memory, and project notes instead of rebuilding context from zero every time
+
+- `~lower experimentation cost`
+  when prompt, role, and retry behavior are tested through Groq budget presets or local Ollama flows before moving into more expensive configurations
+
+- `~higher operator trust`
+  because Arbiter makes run status, reviewer confidence, provider limits, retry structure, and memory state visible instead of burying them inside a single opaque response
+
+In practical terms, Arbiter is meant to move AI usage away from:
+- repeated blind prompting
+- duplicated reviewer spend
+- unstable retries
+- silent provider drift
+
+and toward:
+- controlled iteration
+- reusable learning
+- explicit repair logic
+- better cost/quality predictability
+
+---
+
 ## What makes Arbiter different
 
 There are plenty of “AI agents” projects. Most are thin wrappers around model calls.
@@ -373,4 +411,3 @@ The long-term goal is not just to orchestrate models, but to make the system pro
 Arbiter is built around a principle that more AI products should adopt:
 
 > AI systems become more useful when they are designed to doubt, inspect, and repair themselves before asking the user to trust them.
-
