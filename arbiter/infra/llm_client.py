@@ -91,6 +91,8 @@ class LLMClient:
                 return self._call_gemini(model, system_prompt, user_prompt, temperature)
             elif provider == "ollama":
                 return self._call_ollama(model, system_prompt, user_prompt, temperature)
+            elif provider == "anthropic":
+                return self._call_anthropic(model, system_prompt, user_prompt, temperature)
             else:
                 raise ValueError(f"Unknown provider: {provider}")
         except Exception as e:
@@ -212,6 +214,93 @@ class LLMClient:
             )
 
         return res_json["candidates"][0]["content"]["parts"][0]["text"]
+
+    # ── Ollama ───────────────────────────────────────────────
+    def _call_anthropic(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+    ) -> str:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            return self._error_payload(
+                "anthropic",
+                model,
+                "ANTHROPIC_API_KEY is not set.",
+                "Anthropic API error",
+                "Add ANTHROPIC_API_KEY to your .env before using Claude models.",
+                error_type="provider_error",
+            )
+
+        url = "https://api.anthropic.com/v1/messages"
+        payload = {
+            "model": model,
+            "max_tokens": 2048,
+            "temperature": temperature,
+            "system": system_prompt,
+            "messages": [
+                {"role": "user", "content": user_prompt}
+            ],
+        }
+        req = request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=60) as response:
+                res_json = json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                res_json = json.loads(body)
+            except json.JSONDecodeError:
+                res_json = {}
+            error_info = res_json.get("error", {})
+            error_msg = error_info.get("message", body or "Unknown Anthropic error")
+            error_type = "provider_error"
+            lower = error_msg.lower()
+            if "rate limit" in lower or "quota" in lower:
+                error_type = "rate_limit"
+            fix = (
+                "Anthropic rate limit reached. Retry later or switch to another preset/provider."
+                if error_type == "rate_limit"
+                else "Check ANTHROPIC_API_KEY and Anthropic request format."
+            )
+            return self._error_payload("anthropic", model, error_msg, "Anthropic API error", fix, error_type=error_type)
+        except Exception as exc:
+            return self._error_payload(
+                "anthropic",
+                model,
+                str(exc),
+                "Anthropic API error",
+                "Check ANTHROPIC_API_KEY, network, or Anthropic runtime availability.",
+                error_type="provider_error",
+            )
+
+        parts = res_json.get("content", [])
+        text_parts = [
+            str(part.get("text", "")).strip()
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        if text_parts:
+            return "\n".join(part for part in text_parts if part)
+        return self._error_payload(
+            "anthropic",
+            model,
+            json.dumps(res_json),
+            "Anthropic API error",
+            "Anthropic returned an unexpected response payload.",
+            error_type="provider_error",
+        )
 
     # ── Ollama ───────────────────────────────────────────────
     def _call_ollama(

@@ -41,6 +41,22 @@ _REGISTRY: list[ModelPlugin] = [
         tags=["cheap", "fast"],
     ),
     ModelPlugin(
+        model_id="claude-sonnet-4-20250514",
+        provider="anthropic",
+        cost=0.003,
+        quality_tier="high",
+        roles=["Architect", "Auditor", "Tech Critic", "Logic Critic", "Repair"],
+        tags=["strong", "reasoning", "premium"],
+    ),
+    ModelPlugin(
+        model_id="claude-3-5-haiku-latest",
+        provider="anthropic",
+        cost=0.0008,
+        quality_tier="mid",
+        roles=["Auditor", "Tech Critic", "Logic Critic", "Janitor", "Repair"],
+        tags=["fast", "balanced"],
+    ),
+    ModelPlugin(
         model_id="gemini-2.5-pro",
         provider="gemini",
         cost=0.003,

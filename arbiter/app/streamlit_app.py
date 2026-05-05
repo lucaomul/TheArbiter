@@ -3,6 +3,7 @@ import re
 import html
 import json
 import sys
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -67,6 +68,17 @@ defaults = {
     "stable_mode": True,
     "manual_feedback_enabled": False,
     "manual_feedback_text": "",
+    "project_note_text": "",
+    "model_preset": "Starter - Free Stable",
+    "manual_model_selection": False,
+    "selected_models": {
+        "Architect": "llama-3.3-70b-versatile",
+        "Auditor": "llama-3.3-70b-versatile",
+        "Tech Critic": "llama-3.3-70b-versatile",
+        "Logic Critic": "llama-3.3-70b-versatile",
+        "Janitor": "llama-3.1-8b-instant",
+        "Repair": "llama-3.1-8b-instant",
+    },
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -74,6 +86,88 @@ for k, v in defaults.items():
 
 # ── CSS ──────────────────────────────────────────────────────
 st.markdown(UI_CSS, unsafe_allow_html=True)
+
+
+MODEL_PRESETS = {
+    "Starter - Free Stable": {
+        "description": "Best default for most people: cheap, stable, and easy to trust.",
+        "provider_lock": "groq",
+        "stable_mode": True,
+        "models": {
+            "Architect": "llama-3.3-70b-versatile",
+            "Auditor": "llama-3.3-70b-versatile",
+            "Tech Critic": "llama-3.3-70b-versatile",
+            "Logic Critic": "llama-3.3-70b-versatile",
+            "Janitor": "llama-3.1-8b-instant",
+            "Repair": "llama-3.1-8b-instant",
+        },
+    },
+    "Cheap Test - Groq Lite": {
+        "description": "Lowest-cost Groq-only setup for quick tests, rough iterations, and lighter prompts.",
+        "provider_lock": "groq",
+        "stable_mode": True,
+        "models": {
+            "Architect": "llama-3.1-8b-instant",
+            "Auditor": "llama-3.1-8b-instant",
+            "Tech Critic": "llama-3.1-8b-instant",
+            "Logic Critic": "llama-3.1-8b-instant",
+            "Janitor": "llama-3.1-8b-instant",
+            "Repair": "llama-3.1-8b-instant",
+        },
+    },
+    "Software Builder": {
+        "description": "Best preset for coding and technical build tasks with stronger checking.",
+        "provider_lock": "mixed",
+        "stable_mode": True,
+        "models": {
+            "Architect": "llama-3.3-70b-versatile",
+            "Auditor": "claude-3-5-haiku-latest",
+            "Tech Critic": "gemini-2.5-pro",
+            "Logic Critic": "llama-3.3-70b-versatile",
+            "Janitor": "llama-3.1-8b-instant",
+            "Repair": "llama-3.1-8b-instant",
+        },
+    },
+    "Strategy & Writing": {
+        "description": "Best for marketing, writing, business, and planning tasks where logic and structure matter most.",
+        "provider_lock": "mixed",
+        "stable_mode": True,
+        "models": {
+            "Architect": "claude-sonnet-4-20250514",
+            "Auditor": "claude-3-5-haiku-latest",
+            "Tech Critic": "gemini-2.5-flash",
+            "Logic Critic": "claude-sonnet-4-20250514",
+            "Janitor": "claude-3-5-haiku-latest",
+            "Repair": "llama-3.1-8b-instant",
+        },
+    },
+    "Business Operator": {
+        "description": "Balanced preset for workflows, SOPs, service design, and operations work.",
+        "provider_lock": "mixed",
+        "stable_mode": True,
+        "models": {
+            "Architect": "claude-sonnet-4-20250514",
+            "Auditor": "llama-3.3-70b-versatile",
+            "Tech Critic": "gemini-2.5-pro",
+            "Logic Critic": "claude-sonnet-4-20250514",
+            "Janitor": "claude-3-5-haiku-latest",
+            "Repair": "llama-3.1-8b-instant",
+        },
+    },
+    "Premium Claude Cross-Check": {
+        "description": "High-quality mixed setup for difficult tasks when you want Claude in the main loop.",
+        "provider_lock": "mixed",
+        "stable_mode": False,
+        "models": {
+            "Architect": "claude-sonnet-4-20250514",
+            "Auditor": "claude-3-5-haiku-latest",
+            "Tech Critic": "gemini-2.5-pro",
+            "Logic Critic": "claude-sonnet-4-20250514",
+            "Janitor": "claude-3-5-haiku-latest",
+            "Repair": "gpt-4o-mini",
+        },
+    },
+}
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -90,6 +184,25 @@ def reset_run_state(keep_task_mode: bool = True):
             st.session_state[key] = value
     st.session_state.task_mode = preserved_task_mode
     st.session_state.audit_status = "idle"
+
+
+def get_available_models_for_role(role: str) -> list:
+    from arbiter.infra.plugin_registry import get_plugin_registry
+
+    registry = get_plugin_registry()
+    models = [plugin.model_id for plugin in registry.candidates_for_role(role)]
+    if role == "Logic Critic" and "gemini-2.5-flash" not in models:
+        models.append("gemini-2.5-flash")
+    return models
+
+
+def apply_model_preset(name: str):
+    preset = MODEL_PRESETS.get(name)
+    if not preset:
+        return
+    st.session_state.provider_lock = preset["provider_lock"]
+    st.session_state.stable_mode = preset["stable_mode"]
+    st.session_state.selected_models = dict(preset["models"])
 
 
 def build_retry_context() -> str:
@@ -399,18 +512,20 @@ def render_memory_panel():
     memory_reasons = latest.get("memory_reasons") or []
     related_memory_ids = latest.get("related_memory_ids") or []
     lifecycle_stats = st.session_state.memory_stats.get("memory_lifecycle", {}) or {}
+    project_notes_count = int(st.session_state.memory_stats.get("project_notes_count", 0) or 0)
     active_count = int(lifecycle_stats.get("active", 0) or 0)
     caution_count = int(lifecycle_stats.get("caution", 0) or 0)
     conflicted_count = int(lifecycle_stats.get("conflicted", 0) or 0)
     obsolete_count = int(lifecycle_stats.get("obsolete", 0) or 0)
 
     with st.expander("Working Memory", expanded=False):
-        top = st.columns(5)
+        top = st.columns(6)
         top[0].metric("Current Entry", memory_status)
         top[1].metric("Consensus", f"{memory_consensus:.2f}")
         top[2].metric("Active", active_count)
         top[3].metric("Caution", caution_count)
         top[4].metric("Conflicted", conflicted_count)
+        top[5].metric("Project Notes", project_notes_count)
         if obsolete_count:
             st.caption(f"Obsolete memories archived from active retrieval: {obsolete_count}")
 
@@ -619,37 +734,89 @@ with st.sidebar:
         list(TASK_PROFILES.keys()),
         index=list(TASK_PROFILES.keys()).index(st.session_state.task_mode),
     )
+    st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;'>AI STRATEGY</p>", unsafe_allow_html=True)
+    preset_names = list(MODEL_PRESETS.keys())
+    preset_name = st.selectbox(
+        "AI Preset",
+        preset_names,
+        index=preset_names.index(st.session_state.model_preset) if st.session_state.model_preset in preset_names else 0,
+        help="Start from a named model pack instead of guessing each role manually.",
+    )
+    if preset_name != st.session_state.model_preset:
+        st.session_state.model_preset = preset_name
+        if not st.session_state.manual_model_selection:
+            apply_model_preset(preset_name)
+
+    st.caption(MODEL_PRESETS[st.session_state.model_preset]["description"])
+    st.session_state.manual_model_selection = st.checkbox(
+        "Customize AI Roles Manually",
+        value=st.session_state.manual_model_selection,
+        help="Turn this on if you want to pick the model for each role yourself.",
+    )
+
+    if not st.session_state.manual_model_selection:
+        apply_model_preset(st.session_state.model_preset)
+
     provider_lock_option = st.selectbox(
         "Provider Lock",
-        ["groq", "gemini", "openai", "mixed"],
-        index=["groq", "gemini", "openai", "mixed"].index(st.session_state.provider_lock if st.session_state.provider_lock in {"groq", "gemini", "openai", "mixed"} else "groq"),
+        ["groq", "gemini", "openai", "anthropic", "mixed"],
+        index=["groq", "gemini", "openai", "anthropic", "mixed"].index(st.session_state.provider_lock if st.session_state.provider_lock in {"groq", "gemini", "openai", "anthropic", "mixed"} else "groq"),
+        disabled=not st.session_state.manual_model_selection,
     )
     st.session_state.provider_lock = provider_lock_option
-    st.session_state.stable_mode = st.toggle("Stable Mode", value=st.session_state.stable_mode, help="Keeps the selected provider/model family fixed, disables exploration, and prevents hidden premium escalation.")
+    st.session_state.stable_mode = st.toggle(
+        "Stable Mode",
+        value=st.session_state.stable_mode,
+        help="Keeps the selected provider/model family fixed, disables exploration, and prevents hidden premium escalation.",
+        disabled=not st.session_state.manual_model_selection,
+    )
 
     st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;margin-top:12px;'>MODEL SELECTION</p>", unsafe_allow_html=True)
-    p_mod       = st.selectbox("Architect Brain", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gpt-4o", "gpt-4o-mini"])
-    c_mod_audit = st.selectbox("Auditor", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemini-2.5-flash", "gemini-2.5-pro"])
-    c_mod_tech  = st.selectbox("Tech Critic", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemini-2.5-flash", "gemini-2.5-pro"])
-    c_mod_logic = st.selectbox("Logic Engine", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemini-2.5-flash"])
+    role_order = ["Architect", "Auditor", "Tech Critic", "Logic Critic", "Janitor", "Repair"]
+    role_labels = {
+        "Architect": "Architect Brain",
+        "Auditor": "Auditor",
+        "Tech Critic": "Tech Critic",
+        "Logic Critic": "Logic Engine",
+        "Janitor": "Janitor",
+        "Repair": "Repair",
+    }
+    role_models = {}
+    for role in role_order:
+        options = get_available_models_for_role(role)
+        current_value = st.session_state.selected_models.get(role, options[0] if options else "")
+        if current_value not in options and options:
+            current_value = options[0]
+        chosen = st.selectbox(
+            role_labels[role],
+            options,
+            index=options.index(current_value) if options and current_value in options else 0,
+            key=f"role_model_{role}",
+            disabled=not st.session_state.manual_model_selection,
+        )
+        role_models[role] = chosen
+    if st.session_state.manual_model_selection:
+        st.session_state.selected_models = role_models
+    else:
+        role_models = dict(st.session_state.selected_models)
 
     # Push model choices into selector overrides
     from arbiter.infra.model_selector import get_model_selector
+    from arbiter.infra.plugin_registry import provider_for_model
     sel = get_model_selector()
     sel.set_provider_lock("" if provider_lock_option == "mixed" else provider_lock_option)
-    sel.set_override("Architect",    p_mod)
-    sel.set_override("Auditor",      c_mod_audit)
-    sel.set_override("Tech Critic",  c_mod_tech)
-    sel.set_override("Logic Critic", c_mod_logic)
-    sel.set_override("Repair",       "llama-3.1-8b-instant")
-    sel.set_override("Janitor",      "llama-3.1-8b-instant")
+    for role, model in role_models.items():
+        sel.set_override(role, model)
+
+    if any(provider_for_model(model, "") == "anthropic" for model in role_models.values()) and not os.getenv("ANTHROPIC_API_KEY"):
+        st.warning("Claude/Anthropic models are selected, but `ANTHROPIC_API_KEY` is not set in your `.env` yet.")
 
     st.markdown("""
     <div style='background:rgba(255,170,0,0.05);border:1px solid rgba(255,170,0,0.2);
     border-radius:6px;padding:10px;margin-top:8px;font-size:0.65rem;color:#888;line-height:1.8;'>
-    💡 <b style='color:#ffaa00;'>Free-first mode:</b><br>
-    Groq models are now the default path for Architect, Auditor, Critics, and Janitor.<br>
-    If a Groq model hits quota, Arbiter will temporarily cool it down and try the next fallback model automatically.
+    💡 <b style='color:#ffaa00;'>Preset tip:</b><br>
+    Start with a named preset if you are not sure which AIs to use.<br>
+    Turn on manual customization only when you want to control each role yourself.
     </div>
     """, unsafe_allow_html=True)
 
@@ -814,6 +981,45 @@ elif st.session_state.step == "negotiation":
             )
         else:
             st.session_state.manual_feedback_text = ""
+
+        memory_store = get_memory_store()
+        with st.expander("Project Memory / Notes", expanded=False):
+            st.caption("Save durable project insights here. These notes persist across runs and can be retrieved automatically for similar future tasks.")
+            if hasattr(memory_store, "retrieve_project_notes"):
+                relevant_notes = memory_store.retrieve_project_notes(
+                    st.session_state.task_mode,
+                    st.session_state.current_task or "",
+                    limit=3,
+                )
+                if relevant_notes:
+                    st.markdown("**Relevant Saved Notes**")
+                    for note in relevant_notes:
+                        mode_label = note.get("task_mode") or "General"
+                        st.markdown(f"- [{mode_label}] {note.get('text', '')}")
+                else:
+                    st.caption("No relevant project notes yet.")
+            else:
+                st.caption("Project notes will appear after a full app restart loads the updated memory module.")
+
+            st.session_state.project_note_text = st.text_area(
+                "Save a project note",
+                value=st.session_state.project_note_text,
+                placeholder="Example: For scheduling tasks, employee preferences come by email and non-responders are treated as flexible.",
+                height=110,
+            )
+            if st.button("Save Project Note", key="save_project_note"):
+                note_text = str(st.session_state.project_note_text or "").strip()
+                if note_text and hasattr(memory_store, "add_project_note"):
+                    memory_store.add_project_note(
+                        text=note_text,
+                        task_mode=st.session_state.task_mode,
+                    )
+                    st.session_state.project_note_text = ""
+                    st.session_state.memory_stats = memory_store.stats()
+                    st.success("Project note saved to persistent memory.")
+                    st.rerun()
+                elif note_text:
+                    st.warning("Project notes need one full app restart before saving is available.")
     with col_opt:
         auto_mode      = st.checkbox("AUTONOMOUS MODE", value=False)
         target_score   = st.slider("Target score",   6, 10, 8) if auto_mode else 8.0

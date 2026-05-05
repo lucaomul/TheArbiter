@@ -44,6 +44,8 @@ SETTINGS = Settings()
 PRICES: dict = {
     "gpt-4o":                  0.015,
     "gpt-4o-mini":             0.0006,
+    "claude-sonnet-4-20250514": 0.003,
+    "claude-3-5-haiku-latest":  0.0008,
     "gemini-2.5-pro":          0.003,
     "gemini-2.5-flash":        0.0001,
     "gemini-1.5-pro":          0.003,

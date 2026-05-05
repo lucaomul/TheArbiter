@@ -16,6 +16,7 @@ except Exception:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MEMORY_DIR = PROJECT_ROOT / ".arbiter_memory"
 JSONL_PATH = MEMORY_DIR / "memory_entries.jsonl"
+PROJECT_NOTES_PATH = MEMORY_DIR / "project_notes.json"
 CHROMA_DIR = MEMORY_DIR / "chroma"
 COLLECTION_NAME = "arbiter_memory"
 
@@ -73,12 +74,23 @@ class MemoryStore:
     def __init__(self):
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         self._entries: List[Dict] = []
+        self._project_notes: List[Dict] = []
         self._embedding = LocalHashEmbeddingFunction()
         self._backend = "native"
         self._chroma_client = None
         self._collection = None
         self._load_entries()
+        self._load_project_notes()
         self._init_chroma()
+
+    @staticmethod
+    def _ensure_storage_paths():
+        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+        if not JSONL_PATH.exists():
+            JSONL_PATH.touch()
+        if not PROJECT_NOTES_PATH.exists():
+            PROJECT_NOTES_PATH.write_text("[]", encoding="utf-8")
 
     @staticmethod
     def _tokenize(text: str) -> set:
@@ -92,6 +104,7 @@ class MemoryStore:
         return len(a & b) / len(a | b)
 
     def _load_entries(self):
+        self._ensure_storage_paths()
         if not JSONL_PATH.exists():
             return
         loaded = []
@@ -107,16 +120,40 @@ class MemoryStore:
                 loaded.append(entry)
         self._entries = loaded[-500:]
 
+    def _load_project_notes(self):
+        self._ensure_storage_paths()
+        if not PROJECT_NOTES_PATH.exists():
+            self._project_notes = []
+            return
+        try:
+            payload = json.loads(PROJECT_NOTES_PATH.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                self._project_notes = payload[-200:]
+            else:
+                self._project_notes = []
+        except Exception:
+            self._project_notes = []
+
     def _append_entry(self, entry: Dict):
+        self._ensure_storage_paths()
         with JSONL_PATH.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
     def _persist_entries(self):
+        self._ensure_storage_paths()
         with JSONL_PATH.open("w", encoding="utf-8") as handle:
             for entry in self._entries[-500:]:
                 handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
+    def _persist_project_notes(self):
+        self._ensure_storage_paths()
+        PROJECT_NOTES_PATH.write_text(
+            json.dumps(self._project_notes[-200:], ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+
     def _init_chroma(self):
+        self._ensure_storage_paths()
         if chromadb is None:
             return
         try:
@@ -173,6 +210,55 @@ class MemoryStore:
             )
         except Exception:
             pass
+
+    def add_project_note(self, text: str, task_mode: str = "", tags: Optional[List[str]] = None) -> Dict:
+        note_text = str(text or "").strip()
+        if not note_text:
+            return {}
+        note = {
+            "note_id": "note-" + uuid4().hex,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "task_mode": str(task_mode or "").strip(),
+            "text": note_text[:4000],
+            "tags": [str(tag).strip() for tag in (tags or []) if str(tag).strip()][:10],
+            "tokens": sorted(self._tokenize(note_text)),
+            "active": True,
+        }
+        self._project_notes.append(note)
+        self._project_notes = self._project_notes[-200:]
+        self._persist_project_notes()
+        return note
+
+    def retrieve_project_notes(self, task_mode: str, task_text: str, limit: int = 3) -> List[Dict]:
+        query_tokens = self._tokenize(task_text)
+        ranked = []
+        for note in self._project_notes:
+            if not note.get("active", True):
+                continue
+            note_tokens = set(note.get("tokens", []))
+            mode_bonus = 0.20 if note.get("task_mode") and note.get("task_mode") == task_mode else 0.0
+            overlap = self._overlap_score(query_tokens, note_tokens)
+            total = overlap + mode_bonus
+            if total > 0.08 or (task_mode and note.get("task_mode") == task_mode):
+                ranked.append((total, note))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [note for _, note in ranked[:limit]]
+
+    def summarize_project_notes(self, task_mode: str, task_text: str, limit: int = 3) -> str:
+        notes = self.retrieve_project_notes(task_mode, task_text, limit=limit)
+        if not notes:
+            return ""
+        lines = [
+            "PROJECT MEMORY / MANUAL NOTES:",
+            "These are persistent project insights saved by the user. Treat them as durable guidance.",
+        ]
+        for idx, note in enumerate(notes, start=1):
+            mode = note.get("task_mode") or "General"
+            lines.append(f"{idx}. [{mode}] {note.get('text', '')}")
+        return "\n".join(lines)
+
+    def project_notes(self) -> List[Dict]:
+        return list(self._project_notes[-50:])
 
     @staticmethod
     def _memory_lifecycle(memory_status: str, validity_status: str, score_status: str) -> str:
@@ -531,25 +617,30 @@ class MemoryStore:
 
     def summarize_for_architect(self, task_mode: str, task_text: str, unresolved_issues: dict = None, limit: int = 3) -> str:
         relevant = self.retrieve_relevant(task_mode, task_text, unresolved_issues=unresolved_issues, limit=limit)
-        if not relevant:
+        notes_summary = self.summarize_project_notes(task_mode, task_text, limit=2)
+        if not relevant and not notes_summary:
             return ""
 
-        lines = [
-            "RETRIEVED LEARNING CONTEXT:",
-            "Use these prior cases as reusable patterns and warnings. Reuse the lessons, not the exact text.",
-        ]
-        for idx, item in enumerate(relevant, start=1):
-            lines.append(
-                f"{idx}. State={item.get('memory_lifecycle', 'caution').upper()} | Avg={float(item.get('avg_score', 0.0)):.1f}/10 | Mode={item.get('task_mode', 'Unknown')}"
-            )
-            repairs = (item.get("tech_repair_contract", []) + item.get("logic_repair_contract", []))[:3]
-            if repairs:
-                lines.append("   Reusable repair patterns:")
-                lines.extend([f"   - {step}" for step in repairs])
-            failures = (item.get("preflight_issues", []) + item.get("tech_issues", []) + item.get("logic_issues", []))[:3]
-            if failures:
-                lines.append("   Avoid repeating:")
-                lines.extend([f"   - {issue}" for issue in failures])
+        lines = []
+        if notes_summary:
+            lines.append(notes_summary)
+        if relevant:
+            lines.extend([
+                "RETRIEVED LEARNING CONTEXT:",
+                "Use these prior cases as reusable patterns and warnings. Reuse the lessons, not the exact text.",
+            ])
+            for idx, item in enumerate(relevant, start=1):
+                lines.append(
+                    f"{idx}. State={item.get('memory_lifecycle', 'caution').upper()} | Avg={float(item.get('avg_score', 0.0)):.1f}/10 | Mode={item.get('task_mode', 'Unknown')}"
+                )
+                repairs = (item.get("tech_repair_contract", []) + item.get("logic_repair_contract", []))[:3]
+                if repairs:
+                    lines.append("   Reusable repair patterns:")
+                    lines.extend([f"   - {step}" for step in repairs])
+                failures = (item.get("preflight_issues", []) + item.get("tech_issues", []) + item.get("logic_issues", []))[:3]
+                if failures:
+                    lines.append("   Avoid repeating:")
+                    lines.extend([f"   - {issue}" for issue in failures])
         return "\n".join(lines)
 
     def stats(self) -> dict:
@@ -561,6 +652,7 @@ class MemoryStore:
             "task_modes": dict(modes),
             "memory_status": dict(memory_status),
             "memory_lifecycle": dict(lifecycle),
+            "project_notes_count": len([note for note in self._project_notes if note.get("active", True)]),
             "backend": self._backend,
             "path": str(MEMORY_DIR),
         }
