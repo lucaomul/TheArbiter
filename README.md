@@ -192,33 +192,119 @@ There is a sandbox path for local/Ollama testing so prompt and orchestration beh
 
 ---
 
-## Where It Saves Time and Cost
+## Cost and Efficiency Model
 
-These are **directional design benefits**, not formal benchmark claims:
+The Arbiter is not “cheap” because it uses fewer ideas.
+It is cheaper because it is designed to spend model calls more deliberately.
+
+This matters because multi-agent systems can easily become more expensive than a single model if they:
+- review broken drafts too early
+- rerun with noisy feedback
+- drift across providers silently
+- keep paying premium models for experimentation that should have happened locally
+
+The Arbiter is built to reduce exactly that waste.
+
+### Where cost control comes from
+
+#### 1. Preflight blocks bad spend early
+Before paying for full critic review, The Arbiter runs a deterministic preflight pass.
+
+That means obviously broken outputs can be stopped before they trigger:
+- Tech Critic
+- Logic Critic
+- Janitor
+- extra retry cycles
+
+In failure-heavy workflows, that can save `~1 full review round` on bad drafts.
+
+#### 2. Janitor reduces retry waste
+Instead of feeding the Architect a messy wall of multi-agent criticism, the Janitor converts it into:
+- what is still broken
+- what regressed
+- what to preserve
+- what the next retry must do
+
+That can cut `~1–2 noisy repair cycles` in drift-heavy runs.
+
+#### 3. Model control prevents accidental overspend
+The Arbiter supports:
+- presets
+- manual role selection
+- provider lock
+- stable mode
+- local Ollama testing
+
+So you can decide when to use:
+- cheaper Groq paths
+- mixed-provider review diversity
+- premium Claude or OpenAI paths
+- local experimentation before paid runs
+
+This is important because cost should be a product choice, not a hidden side effect.
+
+#### 4. Memory reduces repeated context rebuild
+When tasks are similar, The Arbiter can reuse:
+- trusted repair patterns
+- prior defect history
+- project notes
+- past successful resolution logic
+
+That does not guarantee fewer calls every time, but it can improve convergence and reduce repeated “start from zero” behavior on recurring task families.
+
+#### 5. Verification reduces false confidence
+A system that accepts weak outputs too early creates hidden downstream cost:
+- bad implementation
+- wasted retries later
+- human cleanup
+- unreliable delivery
+
+By separating:
+- score
+- confidence
+- verification
+- readiness
+
+The Arbiter tries to reduce the very expensive mistake of treating a nice-looking result as a finished one.
+
+### Practical cost interpretation
+
+Use The Arbiter like this:
+- `cheap exploration`
+  local/Ollama or low-cost Groq presets for testing behavior
+- `controlled production`
+  stable provider-locked runs for real delivery
+- `premium escalation`
+  stronger models only when the task actually justifies them
+
+### Directional efficiency benefits
+
+These are **architecture-level estimates**, not formal benchmark claims:
 
 - `~1 full critic round avoided`
   when preflight blocks structurally broken outputs before full review spend
 
-- `~1–2 noisy retries reduced`
-  when Janitor compresses multiple reviewer signals into one repair brief
+- `~1–2 retries reduced`
+  when Janitor compresses reviewer noise into a cleaner repair brief
 
-- `~lower experimentation cost`
-  when local/Ollama testing or cheaper Groq presets are used to refine behavior before higher-cost runs
+- `~lower experimentation spend`
+  when local/Ollama or cheaper presets are used before premium runs
 
 - `~faster convergence on repeated task families`
-  when the Architect can reuse prior repair patterns and trusted memory instead of rebuilding context from zero
+  when memory and prior repair patterns are reused intelligently
 
 - `~higher operator trust`
-  because The Arbiter makes failure modes, validity, provider issues, and retry status explicit instead of hiding them behind one final answer
+  because provider issues, blocked states, verification, and readiness are made explicit
 
-In short:
-The Arbiter is built to reduce:
+In short, The Arbiter is designed to reduce:
 - blind prompting
 - duplicated review spend
 - unstable retries
-- silent provider drift
+- hidden fallback cost
+- false “good enough” wins
 
 and increase:
+- cost awareness
 - controllability
 - reuse
 - clarity
@@ -434,6 +520,16 @@ The next frontier is continued hardening:
 
 In other words:
 The Arbiter is already a serious system, and it is still getting sharper.
+
+---
+
+## Built By
+
+**Luca Crăciun**  
+The Arbiter product build
+
+- GitHub: [github.com/lucaomul](https://github.com/lucaomul)
+- LinkedIn: [gabriel-luca-craciun-25ba95295](https://www.linkedin.com/in/gabriel-luca-craciun-25ba95295)
 
 ---
 

@@ -30,13 +30,17 @@ class PromptRegistry:
             "Architect":    profile["architect"],
             "Tech Critic":  profile["execution"],
             "Logic Critic": profile["logic"],
+            "Janitor":      profile.get("janitor", profile["architect"]),
             "JSON Repair":  "Preserve intended meaning while repairing malformed structured output.",
         }
+        role_playbook = (profile.get("role_playbooks") or {}).get(role, "")
         mode_note = (
             f"\n\nCURRENT TASK MODE: {self.task_mode}\n"
             f"MODE INTENT: {profile['summary']}\n"
             f"ROLE ADAPTATION: {role_guidance.get(role, profile['architect'])}"
         )
+        if role_playbook:
+            mode_note += f"\nROLE PLAYBOOK:\n{role_playbook}"
         return base_prompt + mode_note
 
     def get(self, role: str) -> str:
@@ -65,6 +69,9 @@ class PromptRegistry:
         return (
             "DELIVERY FORMAT:\n"
             f"- {delivery}\n"
+            "- Return the deliverable in plain business/content language by default.\n"
+            "- Do not return executable code, code fences, JSON payloads, schemas, or technical implementation scaffolds unless the user explicitly asks for them.\n"
+            "- If the task mentions a product or system but does not explicitly request implementation, respond with strategy, plan, messaging, operations, or content output instead of code.\n"
             "- Keep the response concrete, concise, and outcome-oriented."
         )
 

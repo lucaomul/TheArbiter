@@ -49,20 +49,21 @@ class FinalVerifier:
         profile = TASK_PROFILES.get(task_mode, TASK_PROFILES["General Problem Solving"])
         validator_type = profile.get("validator", "general")
         raw = html.unescape(str(solution or "")).strip()
+        explicit_code_request = self._explicit_code_request(task_mode, task_text)
         checks = [self._check("non_empty_output", "pass" if raw else "fail", "Output is present." if raw else "No solution content was produced.")]
 
         if validator_type == "software":
             checks.extend(self._verify_software(task_text, raw))
         elif validator_type == "marketing":
-            checks.extend(self._verify_marketing(raw))
+            checks.extend(self._verify_marketing(task_text, raw, explicit_code_request))
         elif validator_type == "operations":
-            checks.extend(self._verify_operations(raw))
+            checks.extend(self._verify_operations(task_text, raw, explicit_code_request))
         elif validator_type == "writing":
-            checks.extend(self._verify_writing(raw))
+            checks.extend(self._verify_writing(task_text, raw, explicit_code_request))
         elif validator_type == "planning":
-            checks.extend(self._verify_planning(raw))
+            checks.extend(self._verify_planning(task_text, raw, explicit_code_request))
         else:
-            checks.extend(self._verify_general(raw))
+            checks.extend(self._verify_general(task_text, raw, explicit_code_request))
 
         confirmed_count = len(list(tech_confirmed_defects or [])) + len(list(logic_confirmed_defects or []))
         if confirmed_count:
@@ -177,12 +178,80 @@ class FinalVerifier:
 
         return checks
 
-    def _verify_marketing(self, raw: str) -> list[dict]:
+    @staticmethod
+    def _explicit_code_request(task_mode: str, task_text: str) -> bool:
+        if task_mode == "Software & IT":
+            return True
+        lowered = str(task_text or "").lower()
+        strong_signals = [
+            "write code",
+            "provide code",
+            "return code",
+            "show code",
+            "generate code",
+            "code snippet",
+            "python",
+            "javascript",
+            "typescript",
+            "react",
+            "streamlit",
+            "html",
+            "css",
+            "sql query",
+            "sql script",
+            "api endpoint",
+            "json schema",
+            "build a web app",
+            "build an app",
+            "technical implementation",
+        ]
+        return any(signal in lowered for signal in strong_signals)
+
+    def _looks_like_wrong_modality_code(self, raw: str) -> bool:
+        content = str(raw or "")
+        if re.search(r"```[\w-]*", content):
+            return True
+
+        non_empty_lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not non_empty_lines:
+            return False
+
+        code_like_count = 0
+        for line in non_empty_lines:
+            if re.search(r"^\s*(def |class |function |const |let |var |import |from |SELECT |INSERT |UPDATE |CREATE )", line, flags=re.IGNORECASE):
+                code_like_count += 1
+                continue
+            if re.search(r"[{};]|=>", line):
+                code_like_count += 1
+                continue
+            if re.search(r"</?[a-z][^>]*>", line, flags=re.IGNORECASE):
+                code_like_count += 1
+                continue
+
+        return code_like_count >= max(4, len(non_empty_lines) // 3)
+
+    def _verify_non_software_shape(self, task_text: str, raw: str, explicit_code_request: bool) -> list[dict]:
+        if explicit_code_request:
+            return []
+        wrong_shape = self._looks_like_wrong_modality_code(raw)
+        return [
+            self._check(
+                "deliverable_shape",
+                "fail" if wrong_shape else "pass",
+                (
+                    "The output stays in plain-language deliverable form."
+                    if not wrong_shape
+                    else "This task mode expected a plain-language deliverable, but the response drifted into code or implementation scaffolding."
+                ),
+            )
+        ]
+
+    def _verify_marketing(self, task_text: str, raw: str, explicit_code_request: bool) -> list[dict]:
         lowered = raw.lower()
         hits = sum(1 for token in ["audience", "offer", "channel", "cta", "hook"] if token in lowered)
         kpi_hits = sum(1 for token in ["kpi", "metric", "conversion", "cac", "cpl", "ctr"] if token in lowered)
         contingency_hits = sum(1 for token in ["fallback", "if", "underperform", "contingency", "backup"] if token in lowered)
-        return [
+        return self._verify_non_software_shape(task_text, raw, explicit_code_request) + [
             self._check(
                 "marketing_specificity",
                 "pass" if hits >= 3 else "caution",
@@ -205,11 +274,11 @@ class FinalVerifier:
             ),
         ]
 
-    def _verify_operations(self, raw: str) -> list[dict]:
+    def _verify_operations(self, task_text: str, raw: str, explicit_code_request: bool) -> list[dict]:
         lowered = raw.lower()
         hits = sum(1 for token in ["owner", "handoff", "step", "risk", "timeline"] if token in lowered)
         control_hits = sum(1 for token in ["sla", "escalation", "exception", "approval", "review"] if token in lowered)
-        return [
+        return self._verify_non_software_shape(task_text, raw, explicit_code_request) + [
             self._check(
                 "operations_structure",
                 "pass" if hits >= 3 else "caution",
@@ -227,10 +296,10 @@ class FinalVerifier:
             ),
         ]
 
-    def _verify_writing(self, raw: str) -> list[dict]:
+    def _verify_writing(self, task_text: str, raw: str, explicit_code_request: bool) -> list[dict]:
         paragraphs = [part for part in re.split(r"\n\s*\n", raw) if part.strip()]
         rhetorical_hits = sum(1 for token in ["however", "for example", "because", "therefore", "in conclusion"] if token in raw.lower())
-        return [
+        return self._verify_non_software_shape(task_text, raw, explicit_code_request) + [
             self._check(
                 "writing_depth",
                 "pass" if len(raw.split()) >= 160 else "caution",
@@ -248,11 +317,11 @@ class FinalVerifier:
             ),
         ]
 
-    def _verify_planning(self, raw: str) -> list[dict]:
+    def _verify_planning(self, task_text: str, raw: str, explicit_code_request: bool) -> list[dict]:
         lowered = raw.lower()
         hits = sum(1 for token in ["next step", "priority", "timeline", "week", "plan"] if token in lowered)
         realism_hits = sum(1 for token in ["tradeoff", "constraint", "risk", "energy", "capacity", "metric"] if token in lowered)
-        return [
+        return self._verify_non_software_shape(task_text, raw, explicit_code_request) + [
             self._check(
                 "planning_actionability",
                 "pass" if hits >= 2 else "caution",
@@ -270,10 +339,10 @@ class FinalVerifier:
             ),
         ]
 
-    def _verify_general(self, raw: str) -> list[dict]:
+    def _verify_general(self, task_text: str, raw: str, explicit_code_request: bool) -> list[dict]:
         has_structure = bool(re.search(r"(^[-*]\s)|(^\d+\.\s)|(^#+\s)", raw, flags=re.MULTILINE))
         action_hits = sum(1 for token in ["recommend", "option", "tradeoff", "next", "because"] if token in raw.lower())
-        return [
+        return self._verify_non_software_shape(task_text, raw, explicit_code_request) + [
             self._check(
                 "general_structure",
                 "pass" if has_structure else "caution",

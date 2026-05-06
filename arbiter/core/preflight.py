@@ -33,6 +33,7 @@ class PreflightValidator:
         issues: list[str] = []
         raw = html.unescape(str(solution or "")).strip()
         text = raw.lower()
+        explicit_code_request = self._explicit_code_request(task_mode, task_text)
 
         if "[object object]" in text:
             issues.append("Remove all `[object Object]` garbage from the response.")
@@ -50,13 +51,15 @@ class PreflightValidator:
             if self._is_scheduling_task(task_text):
                 issues.extend(self._validate_scheduling(raw))
         elif validator_type == "marketing":
-            issues.extend(self._validate_marketing(raw))
+            issues.extend(self._validate_marketing(task_text, raw, explicit_code_request))
         elif validator_type == "operations":
-            issues.extend(self._validate_operations(raw))
+            issues.extend(self._validate_operations(task_text, raw, explicit_code_request))
         elif validator_type == "writing":
-            issues.extend(self._validate_writing(raw))
+            issues.extend(self._validate_writing(task_text, raw, explicit_code_request))
         elif validator_type == "planning":
-            issues.extend(self._validate_planning(raw))
+            issues.extend(self._validate_planning(task_text, raw, explicit_code_request))
+        elif validator_type == "general":
+            issues.extend(self._validate_general(task_text, raw, explicit_code_request))
 
         # Deduplicate while preserving order
         deduped = []
@@ -146,6 +149,67 @@ class PreflightValidator:
                 matches.append(stripped[:180])
         return matches[:5]
 
+    @staticmethod
+    def _explicit_code_request(task_mode: str, task_text: str) -> bool:
+        if task_mode == "Software & IT":
+            return True
+        lowered = str(task_text or "").lower()
+        strong_signals = [
+            "write code",
+            "provide code",
+            "return code",
+            "show code",
+            "generate code",
+            "code snippet",
+            "python",
+            "javascript",
+            "typescript",
+            "react",
+            "streamlit",
+            "html",
+            "css",
+            "sql query",
+            "sql script",
+            "api endpoint",
+            "json schema",
+            "build a web app",
+            "build an app",
+            "technical implementation",
+        ]
+        return any(signal in lowered for signal in strong_signals)
+
+    def _looks_like_wrong_modality_code(self, raw: str) -> bool:
+        content = str(raw or "")
+        if re.search(r"```[\w-]*", content):
+            return True
+
+        non_empty_lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not non_empty_lines:
+            return False
+
+        code_like_count = 0
+        for line in non_empty_lines:
+            if re.search(r"^\s*(def |class |function |const |let |var |import |from |SELECT |INSERT |UPDATE |CREATE )", line, flags=re.IGNORECASE):
+                code_like_count += 1
+                continue
+            if re.search(r"[{};]|=>", line):
+                code_like_count += 1
+                continue
+            if re.search(r"</?[a-z][^>]*>", line, flags=re.IGNORECASE):
+                code_like_count += 1
+                continue
+
+        return code_like_count >= max(4, len(non_empty_lines) // 3)
+
+    def _validate_non_software_shape(self, task_text: str, raw: str, explicit_code_request: bool) -> list[str]:
+        if explicit_code_request:
+            return []
+        if self._looks_like_wrong_modality_code(raw):
+            return [
+                "This task mode expects a plain-language deliverable, not executable code or implementation scaffolding, unless the task explicitly asks for code."
+            ]
+        return []
+
     def _extract_primary_code(self, content: str) -> str:
         matches = list(re.finditer(r"```(\w+)?\n?(.*?)```", content, flags=re.DOTALL))
         if matches:
@@ -216,27 +280,34 @@ class PreflightValidator:
 
         return issues
 
-    def _validate_marketing(self, raw: str) -> list[str]:
+    def _validate_marketing(self, task_text: str, raw: str, explicit_code_request: bool) -> list[str]:
+        issues = self._validate_non_software_shape(task_text, raw, explicit_code_request)
         lowered = raw.lower()
         required = ["audience", "offer", "channel", "cta"]
         if sum(1 for item in required if item in lowered) < 2:
-            return ["Marketing solution is too generic; include audience, offer, channel, or CTA specifics."]
-        return []
+            issues.append("Marketing solution is too generic; include audience, offer, channel, or CTA specifics.")
+        return issues
 
-    def _validate_operations(self, raw: str) -> list[str]:
+    def _validate_operations(self, task_text: str, raw: str, explicit_code_request: bool) -> list[str]:
+        issues = self._validate_non_software_shape(task_text, raw, explicit_code_request)
         lowered = raw.lower()
         required = ["owner", "handoff", "step", "risk"]
         if sum(1 for item in required if item in lowered) < 2:
-            return ["Operations solution is too vague; include steps, ownership, handoffs, or risks."]
-        return []
+            issues.append("Operations solution is too vague; include steps, ownership, handoffs, or risks.")
+        return issues
 
-    def _validate_writing(self, raw: str) -> list[str]:
+    def _validate_writing(self, task_text: str, raw: str, explicit_code_request: bool) -> list[str]:
+        issues = self._validate_non_software_shape(task_text, raw, explicit_code_request)
         if len(raw.split()) < 80:
-            return ["Writing solution is too thin; provide a fuller deliverable rather than outline fragments."]
-        return []
+            issues.append("Writing solution is too thin; provide a fuller deliverable rather than outline fragments.")
+        return issues
 
-    def _validate_planning(self, raw: str) -> list[str]:
+    def _validate_planning(self, task_text: str, raw: str, explicit_code_request: bool) -> list[str]:
+        issues = self._validate_non_software_shape(task_text, raw, explicit_code_request)
         lowered = raw.lower()
         if not any(token in lowered for token in ["next step", "next steps", "timeline", "priority"]):
-            return ["Planning solution should include priorities, timeline, or concrete next steps."]
-        return []
+            issues.append("Planning solution should include priorities, timeline, or concrete next steps.")
+        return issues
+
+    def _validate_general(self, task_text: str, raw: str, explicit_code_request: bool) -> list[str]:
+        return self._validate_non_software_shape(task_text, raw, explicit_code_request)
