@@ -1,8 +1,8 @@
 import os
 import json
-import logging
 import re
 import time
+import threading
 from pathlib import Path
 from urllib import error, request
 
@@ -18,10 +18,11 @@ except ImportError:  # pragma: no cover - optional dependency in test/minimal en
     OpenAI = None
 
 from arbiter.config.settings import PRICES, estimate_token_cost_usd
+from arbiter.infra.structured_logging import get_logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class LLMClient:
@@ -35,6 +36,14 @@ class LLMClient:
         self._groq_client   = None
         self._ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self._last_call_metadata = {}
+        self._metadata_lock = threading.RLock()
+        self._session_stats = {
+            "total_tokens": 0,
+            "total_cost_usd": 0.0,
+            "total_calls": 0,
+            "calls_by_agent": {},
+            "latency_total_ms": 0.0,
+        }
 
     @staticmethod
     def _extract_retry_after_seconds(message: str):
@@ -91,6 +100,7 @@ class LLMClient:
         latency_ms: float = None,
         cost_method: str = "provider_usage",
         cached: bool = False,
+        agent_name: str = "",
     ) -> dict:
         usage = usage or {}
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
@@ -123,6 +133,7 @@ class LLMClient:
         return {
             "provider": provider,
             "model": model,
+            "agent_name": agent_name,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": max(0, prompt_tokens + completion_tokens),
@@ -133,10 +144,55 @@ class LLMClient:
         }
 
     def _set_last_call_metadata(self, metadata: dict):
-        self._last_call_metadata = dict(metadata or {})
+        with self._metadata_lock:
+            self._last_call_metadata = dict(metadata or {})
+            self._record_session_call(self._last_call_metadata)
 
     def get_last_call_metadata(self) -> dict:
-        return dict(self._last_call_metadata or {})
+        with self._metadata_lock:
+            return dict(self._last_call_metadata or {})
+
+    def _record_session_call(self, metadata: dict):
+        if not metadata:
+            return
+        total_tokens = int(metadata.get("total_tokens", 0) or 0)
+        cost = float(metadata.get("estimated_cost_usd", 0.0) or 0.0)
+        latency_ms = float(metadata.get("latency_ms", 0.0) or 0.0)
+        agent_name = str(metadata.get("agent_name", "") or "unknown")
+        self._session_stats["total_tokens"] += total_tokens
+        self._session_stats["total_cost_usd"] = round(self._session_stats["total_cost_usd"] + cost, 8)
+        self._session_stats["total_calls"] += 1
+        self._session_stats["latency_total_ms"] += latency_ms
+
+        agent_bucket = self._session_stats["calls_by_agent"].setdefault(
+            agent_name,
+            {"tokens": 0, "cost": 0.0, "calls": 0},
+        )
+        agent_bucket["tokens"] += total_tokens
+        agent_bucket["cost"] = round(float(agent_bucket["cost"]) + cost, 8)
+        agent_bucket["calls"] += 1
+
+    def get_session_stats(self) -> dict:
+        with self._metadata_lock:
+            total_calls = int(self._session_stats.get("total_calls", 0) or 0)
+            avg_latency_ms = round(
+                (float(self._session_stats.get("latency_total_ms", 0.0) or 0.0) / total_calls),
+                2,
+            ) if total_calls else 0.0
+            calls_by_agent = {}
+            for agent_name, bucket in dict(self._session_stats.get("calls_by_agent", {})).items():
+                calls_by_agent[agent_name] = {
+                    "tokens": int(bucket.get("tokens", 0) or 0),
+                    "cost": round(float(bucket.get("cost", 0.0) or 0.0), 8),
+                    "calls": int(bucket.get("calls", 0) or 0),
+                }
+            return {
+                "total_tokens": int(self._session_stats.get("total_tokens", 0) or 0),
+                "total_cost_usd": round(float(self._session_stats.get("total_cost_usd", 0.0) or 0.0), 8),
+                "total_calls": total_calls,
+                "calls_by_agent": calls_by_agent,
+                "avg_latency_ms": avg_latency_ms,
+            }
 
     @staticmethod
     def _response_error_type(response: str):
@@ -183,6 +239,7 @@ class LLMClient:
         user_prompt: str,
         force_json: bool = False,
         temperature: float = 0.7,
+        agent_name: str = "",
     ) -> str:
         start_time = time.perf_counter()
         self._set_last_call_metadata({})
@@ -192,6 +249,7 @@ class LLMClient:
                 "provider": provider,
                 "model": model,
                 "force_json": force_json,
+                "agent_name": agent_name,
             },
         )
         try:
@@ -214,6 +272,7 @@ class LLMClient:
                     {
                         "provider": provider,
                         "model": model,
+                        "agent_name": agent_name,
                         "prompt_tokens": 0,
                         "completion_tokens": 0,
                         "total_tokens": 0,
@@ -229,6 +288,7 @@ class LLMClient:
                     extra={
                         "provider": provider,
                         "model": model,
+                        "agent_name": agent_name,
                         "latency_ms": latency_ms,
                         "error_type": error_type,
                     },
@@ -244,6 +304,7 @@ class LLMClient:
                     usage=usage,
                     latency_ms=latency_ms,
                     cost_method="provider_usage" if usage else "heuristic_tokens",
+                    agent_name=agent_name,
                 )
             )
             logger.debug(
@@ -251,6 +312,7 @@ class LLMClient:
                 extra={
                     "provider": provider,
                     "model": model,
+                    "agent_name": agent_name,
                     "latency_ms": latency_ms,
                     "estimated_cost_usd": self._last_call_metadata.get("estimated_cost_usd", 0.0),
                     "cost_method": self._last_call_metadata.get("cost_method", ""),
@@ -269,6 +331,7 @@ class LLMClient:
                 {
                     "provider": provider,
                     "model": model,
+                    "agent_name": agent_name,
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,
@@ -284,6 +347,7 @@ class LLMClient:
                 extra={
                     "provider": provider,
                     "model": model,
+                    "agent_name": agent_name,
                     "latency_ms": latency_ms,
                     "error_type": error_type,
                 },

@@ -23,7 +23,7 @@ class Settings:
     cheap_model_threshold: float = 6.0
 
     # Exploration rate for model selector (0-1)
-    exploration_rate: float = 0.08
+    exploration_rate: float = 0.15
 
     # Validation / repair
     enable_preflight: bool = True
@@ -32,6 +32,8 @@ class Settings:
     allow_diagnostic_critics_on_preflight_fail: bool = True
     critic_debate_enabled: bool = True
     final_validation_enabled: bool = True
+    parallel_critics: bool = True
+    critic_timeout_seconds: int = 45
 
     # Provider resilience
     rate_limit_cooldown_seconds: int = 45 * 60
@@ -58,11 +60,14 @@ PRICES: dict = {
     "claude-sonnet-4-20250514": 0.003,
     "claude-3-5-haiku-latest":  0.0008,
     "gemini-2.5-pro":          0.003,
+    "gemini-2.5-pro-preview-05-06": 0.003,
     "gemini-2.5-flash":        0.0001,
     "gemini-1.5-pro":          0.003,
     "gemini-1.5-flash":        0.0001,
     "llama-3.3-70b-versatile": 0.000001,
+    "llama-3.1-70b-versatile": 0.000001,
     "llama-3.1-8b-instant":    0.000001,
+    "mixtral-8x7b-32768":      0.000001,
 }
 
 
@@ -72,9 +77,12 @@ TOKEN_PRICING_USD_PER_MILLION: dict = {
     "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
     "claude-3-5-haiku-latest": {"input": 0.80, "output": 4.00},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "gemini-2.5-pro-preview-05-06": {"input": 1.25, "output": 10.00},
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
+    "llama-3.1-70b-versatile": {"input": 0.59, "output": 0.79},
     "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
+    "mixtral-8x7b-32768": {"input": 0.24, "output": 0.24},
 }
 
 

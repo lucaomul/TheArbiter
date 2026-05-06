@@ -119,6 +119,33 @@ for k, v in defaults.items():
 
 MAX_AUDIT_CLARIFICATION_ROUNDS = 3
 
+TASK_INPUT_GUIDES = {
+    "Software & IT": {
+        "placeholder": "Describe the software task, bug, feature, architecture, or implementation problem you want solved...",
+        "caption": "Give the product goal, current constraints, stack, expected behavior, and any error signals if they exist.",
+    },
+    "Marketing & Growth": {
+        "placeholder": "Describe the market, audience, offer, growth goal, budget, and channel problem you want The Arbiter to solve...",
+        "caption": "Good inputs mention ICP, offer, channels, timeline, KPIs, constraints, and what success should look like.",
+    },
+    "Business & Operations": {
+        "placeholder": "Describe the operational workflow, team structure, bottleneck, or process design problem you want improved...",
+        "caption": "Include roles, handoffs, SLAs, bottlenecks, escalation rules, tools, and any real-world constraints.",
+    },
+    "Writing & Content": {
+        "placeholder": "Describe the content you need written, who it is for, the tone, structure, and what message it must land...",
+        "caption": "Mention audience, format, tone, objective, key arguments, examples, and what the final piece should achieve.",
+    },
+    "Personal Planning": {
+        "placeholder": "Describe the personal plan, decision, habit system, or roadmap you want structured clearly and realistically...",
+        "caption": "The more useful inputs usually include goals, deadlines, tradeoffs, available time, energy limits, and blockers.",
+    },
+    "General Problem Solving": {
+        "placeholder": "Describe the situation, decision, tradeoff, or open problem you want broken down into a strong recommendation...",
+        "caption": "Include the context, decision options, risks, constraints, and what a good outcome would look like.",
+    },
+}
+
 # ── CSS ──────────────────────────────────────────────────────
 st.markdown(UI_CSS, unsafe_allow_html=True)
 
@@ -855,6 +882,11 @@ def render_product_header():
     )
 
 
+def current_task_input_guide() -> dict:
+    fallback = TASK_INPUT_GUIDES["General Problem Solving"]
+    return TASK_INPUT_GUIDES.get(st.session_state.task_mode, fallback)
+
+
 def render_intelligence_signals():
     if not st.session_state.iteration_history:
         return
@@ -1539,6 +1571,8 @@ def render_review_panel():
     verification_score = float(latest.get("verification_score", 0.0) or 0.0)
     verification_summary = str(latest.get("verification_summary", "") or "").strip()
     ship_readiness = str(latest.get("ship_readiness", "UNASSESSED")).upper()
+    raw_avg_score = float(latest.get("raw_avg_score", latest.get("avg", 0.0)) or 0.0)
+    calibrated_score = float(latest.get("avg", 0.0) or 0.0)
     tech_confirmed = latest.get("tech_confirmed_defects", []) or []
     tech_risks = latest.get("tech_risks", []) or []
     tech_improvements = latest.get("tech_improvements", []) or []
@@ -1571,13 +1605,37 @@ def render_review_panel():
                 ("Status", validity_status),
                 ("Technical Score", f"{latest['tech']}/10"),
                 ("Logic Score", f"{latest['logic']}/10"),
-                ("Weighted Average", f"{latest['avg']:.1f}/10"),
+                ("Critic Average", f"{raw_avg_score:.1f}/10"),
+                ("Calibrated Score", f"{calibrated_score:.1f}/10"),
                 ("Confidence", review_confidence.upper()),
                 ("Verification", verification_status),
                 ("Readiness", ship_readiness),
             ]
         )
-        st.caption(f"Score type: {score_status.upper()} · {status_note}")
+        if abs(calibrated_score - raw_avg_score) > 0.01:
+            st.caption(
+                f"Score type: {score_status.upper()} · Critics averaged {raw_avg_score:.1f}/10, "
+                f"then verification adjusted the final score to {calibrated_score:.1f}/10. · {status_note}"
+            )
+        else:
+            st.caption(f"Score type: {score_status.upper()} · {status_note}")
+        st.markdown(
+            """
+            <div class="arbiter-help-inline">
+                <span>How these scores work</span>
+                <span class="arbiter-help-icon" tabindex="0">?
+                    <span class="arbiter-help-bubble">
+                        <b>Critic Average</b> is the raw score from the technical and logic critics.
+                        <br><br>
+                        <b>Calibrated Score</b> is the final round score after deterministic verification
+                        adjusts that critic average up or down based on caution points, confirmed defects,
+                        and structural validation.
+                    </span>
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         if verification_summary:
             st.info(f"Verification {verification_score:.2f} · {verification_summary}")
 
@@ -1865,6 +1923,7 @@ elif st.session_state.step in {"audit", "clarification"} or (
 # STEP 1: Input
 # ════════════════════════════════════════════════
 if st.session_state.step == "input":
+    input_guide = current_task_input_guide()
     with st.form("arbiter_input_form", clear_on_submit=False):
         st.session_state.auto_mode_enabled = st.checkbox(
             "Autonomous mode",
@@ -1891,11 +1950,12 @@ if st.session_state.step == "input":
         u_input = st.text_area(
             "OVERRIDE COMMAND:",
             value=st.session_state.task_draft,
-            placeholder="Describe your technical task in detail...",
+            placeholder=input_guide["placeholder"],
             height=150,
             key=task_input_key,
         )
         submitted = st.form_submit_button("INITIALIZE COGNITIVE LOOP")
+    st.caption(input_guide["caption"])
     st.caption("The Arbiter will either ask for missing context or confirm that the task is clear enough to proceed.")
     if submitted and u_input:
         reset_run_state(keep_task_mode=True)

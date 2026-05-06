@@ -9,10 +9,18 @@ description = "Multi-agent LLM orchestration framework for critique, iteration, 
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+  "aiosqlite>=0.20",
+  "alembic>=1.13",
+  "fastapi>=0.115",
+  "greenlet>=3.0",
+  "plotly>=5.22",
   "streamlit>=1.32",
+  "pydantic>=2.8",
   "openai>=1.30",
   "python-dotenv>=1.0",
+  "sqlalchemy>=2.0",
   "chromadb>=0.5",
+  "uvicorn>=0.30",
 ]
 
 [tool.setuptools.packages.find]

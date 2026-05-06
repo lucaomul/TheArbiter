@@ -30,7 +30,7 @@ class BaseAgent:
         # Check cache
         cached = self._cache.get(self.provider, self.model, full_prompt)
         if cached:
-            self._last_call_metadata = self._client._build_usage_metadata(
+            metadata = self._client._build_usage_metadata(
                 provider=self.provider,
                 model=self.model,
                 system_prompt=self.system_prompt,
@@ -40,7 +40,10 @@ class BaseAgent:
                 latency_ms=0.0,
                 cost_method="cache_hit",
                 cached=True,
+                agent_name=self.name,
             )
+            self._client._set_last_call_metadata(metadata)
+            self._last_call_metadata = self._client.get_last_call_metadata()
             return cached
 
         response = self._client.generate(
@@ -50,6 +53,7 @@ class BaseAgent:
             user_prompt=full_prompt,
             force_json=force_json and self.provider == "openai",
             temperature=0.1 if self.name != "Architect" else 0.4,
+            agent_name=self.name,
         )
         self._last_call_metadata = self._client.get_last_call_metadata()
 
@@ -204,12 +208,18 @@ class BaseAgent:
     def normalize(data: dict, default_score: int = 1) -> dict:
         result = dict(data or {})
         try:
-            score = int(result.get("score", default_score))
+            score = int(round(float(result.get("score", default_score))))
         except Exception:
             score = default_score
         result["score"]          = max(1, min(10, score))
-        result["critique"]       = str(result.get("critique", "")).strip() or "No critique returned."
-        result["fix_suggestion"] = str(result.get("fix_suggestion", "")).strip() or "No fix suggestion returned."
+        critique = str(result.get("critique", "")).strip() or "No critique returned."
+        if len(critique) > 1200:
+            critique = critique[:1200].rstrip() + "... [truncated]"
+        fix_suggestion = str(result.get("fix_suggestion", "")).strip() or "No fix suggestion returned."
+        if len(fix_suggestion) > 400:
+            fix_suggestion = fix_suggestion[:400].rstrip() + "... [truncated]"
+        result["critique"] = critique
+        result["fix_suggestion"] = fix_suggestion
         for key in ("confirmed_defects", "risks", "improvements"):
             value = result.get(key, [])
             if not isinstance(value, list):
@@ -324,12 +334,92 @@ class AuditorAgent(BaseAgent):
         provider = provider_for_model(model, "gemini")
         super().__init__("Auditor", provider, model, system_prompt)
 
+    @staticmethod
+    def _question_lines(raw: str) -> list[str]:
+        questions = []
+        for line in str(raw or "").splitlines():
+            text = str(line or "").strip()
+            text = re.sub(r"^[\-\*\d\.\)\s]+", "", text).strip()
+            if text.endswith("?") and len(text) > 12:
+                questions.append(text)
+        deduped = []
+        for question in questions:
+            lowered = question.lower()
+            if lowered not in {item.lower() for item in deduped}:
+                deduped.append(question)
+        return deduped[:3]
+
+    @staticmethod
+    def _fallback_prompt_for_mode(task_mode: str) -> str:
+        prompts = {
+            "Software & IT": "What stack, constraints, or input/output details are still missing?",
+            "Marketing & Growth": "What audience, offer, or success metric should this be optimized for?",
+            "Business & Operations": "What process, ownership, or operational constraint still needs to be clarified?",
+            "Writing & Content": "Who is this for, what format should it take, and what outcome should it achieve?",
+            "Personal Planning": "What time horizon, goal, or personal constraint should shape the plan?",
+            "General Problem Solving": "What objective, constraint, or success condition still needs to be clarified?",
+        }
+        return prompts.get(task_mode, prompts["General Problem Solving"])
+
+    def _recover_audit_result(self, task: str, raw: str) -> dict:
+        task_mode = self.extract_task_mode(task)
+        text = str(raw or "").strip()
+        lowered = text.lower()
+
+        questions = self._question_lines(text)
+        if questions:
+            return {"clear": False, "questions": questions}
+
+        approved_signals = (
+            "specific enough to proceed",
+            "clear enough to proceed",
+            "approved",
+            "sufficient context",
+            '"clear": true',
+        )
+        if any(signal in lowered for signal in approved_signals):
+            return {"clear": True, "questions": []}
+
+        blocked_signals = (
+            "need more context",
+            "needs more context",
+            "missing context",
+            "missing information",
+            "unclear",
+            "ambiguous",
+            "too vague",
+            "not enough detail",
+        )
+        if any(signal in lowered for signal in blocked_signals):
+            return {
+                "clear": False,
+                "questions": [self._fallback_prompt_for_mode(task_mode)],
+            }
+
+        provider_error = self.error_payload(text)
+        if provider_error and provider_error.get("provider_error"):
+            return {
+                "clear": False,
+                "questions": ["The Auditor could not complete its check because the selected model/provider failed. Retry the run or switch models."],
+            }
+
+        return {"clear": True, "questions": []}
+
     def audit(self, task: str) -> dict:
         raw = self.run(task, force_json=False)
         result = self.clean_json(raw)
         if result.get("parse_error"):
-            return {"clear": False, "questions": ["Could not parse auditor response. Please rephrase your task."]}
-        return result
+            return self._recover_audit_result(task, raw)
+        clear = bool(result.get("clear", True))
+        questions = result.get("questions", [])
+        if not isinstance(questions, list):
+            questions = [str(questions)]
+        questions = [str(item).strip() for item in questions if str(item).strip()][:3]
+        if clear:
+            return {"clear": True, "questions": []}
+        if questions:
+            return {"clear": False, "questions": questions}
+        return self._recover_audit_result(task, raw)
 
 
 class RepairAgent(BaseAgent):

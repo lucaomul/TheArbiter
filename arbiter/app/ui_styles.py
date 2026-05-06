@@ -181,6 +181,90 @@ span {
     outline: none !important;
 }
 
+div[data-testid="stTooltipIcon"] button,
+button[aria-label*="Help"],
+button[title*="Help"] {
+    background: #ffffff !important;
+    color: #111111 !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 999px !important;
+}
+
+div[data-testid="stTooltipIcon"] button svg,
+button[aria-label*="Help"] svg,
+button[title*="Help"] svg {
+    fill: #111111 !important;
+    color: #111111 !important;
+}
+
+[data-baseweb="tooltip"],
+[role="tooltip"] {
+    background: #111111 !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255,255,255,0.14) !important;
+    box-shadow: 0 14px 28px rgba(0,0,0,0.24) !important;
+}
+
+[data-baseweb="tooltip"] *,
+[role="tooltip"] * {
+    color: #ffffff !important;
+    fill: #ffffff !important;
+}
+
+.arbiter-help-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-top: 0.2rem;
+    margin-bottom: 0.5rem;
+    color: #4f4f4a;
+    font-size: 0.84rem;
+    line-height: 1.45;
+}
+
+.arbiter-help-icon {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.15rem;
+    height: 1.15rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: #ffffff;
+    color: #111111;
+    font-size: 0.74rem;
+    font-weight: 700;
+    cursor: help;
+    user-select: none;
+}
+
+.arbiter-help-bubble {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 10px);
+    transform: translateX(-50%);
+    width: min(300px, 72vw);
+    padding: 0.7rem 0.85rem;
+    border-radius: 12px;
+    background: #111111;
+    color: #ffffff;
+    border: 1px solid rgba(255,255,255,0.12);
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.22);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+    z-index: 20;
+}
+
+.arbiter-help-icon:hover .arbiter-help-bubble,
+.arbiter-help-icon:focus .arbiter-help-bubble,
+.arbiter-help-icon:focus-within .arbiter-help-bubble {
+    opacity: 1;
+}
+
 .stButton > button {
     border-radius: 14px !important;
     border: 1px solid #111111 !important;

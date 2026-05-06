@@ -12,6 +12,7 @@ class IterationRecord:
     logic_critique: str
     fix: str
     solution: str
+    raw_avg_score: float = 0.0
     validity_status: str = "VALID"
     score_status: str = "final"
     review_confidence: str = "normal"
@@ -228,6 +229,7 @@ class ArbiterState:
             "tech":           record.tech,
             "logic":          record.logic,
             "avg":            record.avg,
+            "raw_avg_score":  getattr(record, "raw_avg_score", record.avg),
             "solution":       record.solution,
             "validity_status": getattr(record, "validity_status", "VALID"),
             "score_status": getattr(record, "score_status", "final"),

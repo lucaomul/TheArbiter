@@ -1,8 +1,12 @@
 .env
 venv/
+.venv/
 __pycache__/
 *.mp4
 *.webm
 *.pdf
 .DS_Store
 .arbiter_memory/
+arbiter.db
+*.sqlite
+*.sqlite3

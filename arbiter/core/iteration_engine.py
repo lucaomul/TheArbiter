@@ -1,5 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Optional
-import logging
 import re
 from uuid import uuid4
 
@@ -16,8 +16,10 @@ from arbiter.prompts.registry import PromptRegistry
 from arbiter.config.settings import SETTINGS
 from arbiter.infra.memory_store import get_memory_store
 from arbiter.infra.benchmark_store import get_benchmark_store
+from arbiter.infra.db import save_iteration_sync, save_memory_entry_sync, save_run_sync
+from arbiter.infra.structured_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class IterationEngine:
@@ -177,6 +179,8 @@ class IterationEngine:
                     state.iteration_history[-1]["memory_consensus_score"] = record.memory_consensus_score
                     state.iteration_history[-1]["memory_reasons"] = record.memory_reasons
                     state.iteration_history[-1]["related_memory_ids"] = record.related_memory_ids
+                save_memory_entry_sync(memory_entry)
+                self._persist_iteration_record(run_id, record)
                 stop = True
                 reason = proposal_error.get("fix_suggestion", "Architect provider error.")
                 break
@@ -242,12 +246,15 @@ class IterationEngine:
                 janitor_report = {}
 
                 if SETTINGS.allow_diagnostic_critics_on_preflight_fail:
-                    t_res, tech_model = self.runner.run_tech_critic(proposal, {**context, "force_quality": False})
-                    l_res, logic_model = self.runner.run_logic_critic(proposal, {**context, "force_quality": False})
-                    state.track_cost("Tech Critic", self.runner.latest_call_cost("Tech Critic", tech_model))
-                    state.track_cost("Logic Critic", self.runner.latest_call_cost("Logic Critic", logic_model))
-                    state.record_model_usage("Tech Critic", tech_model, self.runner.latest_call_metadata("Tech Critic"))
-                    state.record_model_usage("Logic Critic", logic_model, self.runner.latest_call_metadata("Logic Critic"))
+                    diagnostic_context = {**context, "force_quality": False}
+                    t_res, tech_model, l_res, logic_model = self._run_initial_critics(
+                        proposal,
+                        diagnostic_context,
+                        run_id=run_id,
+                        iteration=state.iteration,
+                    )
+                    self._record_role_call(state, "Tech Critic", "Tech Critic", tech_model)
+                    self._record_role_call(state, "Logic Critic", "Logic Critic", logic_model)
                     critic_overlap = self._critic_overlap(t_res, l_res)
                     critic_redundancy = critic_overlap >= 0.72
                     if critic_redundancy:
@@ -260,12 +267,11 @@ class IterationEngine:
                         )
                         rerun_logic, rerun_logic_model = self.runner.run_logic_critic(
                             proposal,
-                            {**context, "force_quality": False},
+                            diagnostic_context,
                             extra_instruction=extra_instruction,
                         )
                         rerun_overlap = self._critic_overlap(t_res, rerun_logic)
-                        state.track_cost("Logic Critic", self.runner.latest_call_cost("Logic Critic", rerun_logic_model))
-                        state.record_model_usage("Logic Critic Recheck", rerun_logic_model, self.runner.latest_call_metadata("Logic Critic"))
+                        self._record_role_call(state, "Logic Critic", "Logic Critic Recheck", rerun_logic_model)
                         if rerun_overlap < critic_overlap:
                             l_res = rerun_logic
                             logic_model = rerun_logic_model
@@ -397,18 +403,21 @@ class IterationEngine:
                     state.iteration_history[-1]["memory_consensus_score"] = record.memory_consensus_score
                     state.iteration_history[-1]["memory_reasons"] = record.memory_reasons
                     state.iteration_history[-1]["related_memory_ids"] = record.related_memory_ids
+                save_memory_entry_sync(memory_entry)
+                self._persist_iteration_record(run_id, record)
                 stop = True
                 reason = stop_reason
                 break
 
             # ── 3. Critics (sequential — parallel optional) ──
-            t_res, t_model = self.runner.run_tech_critic(proposal, context)
-            l_res, l_model = self.runner.run_logic_critic(proposal, context)
-
-            state.track_cost("Tech Critic", self.runner.latest_call_cost("Tech Critic", t_model))
-            state.track_cost("Logic Critic", self.runner.latest_call_cost("Logic Critic", l_model))
-            state.record_model_usage("Tech Critic", t_model, self.runner.latest_call_metadata("Tech Critic"))
-            state.record_model_usage("Logic Critic", l_model, self.runner.latest_call_metadata("Logic Critic"))
+            t_res, t_model, l_res, l_model = self._run_initial_critics(
+                proposal,
+                context,
+                run_id=run_id,
+                iteration=state.iteration,
+            )
+            self._record_role_call(state, "Tech Critic", "Tech Critic", t_model)
+            self._record_role_call(state, "Logic Critic", "Logic Critic", l_model)
 
             critic_overlap = self._critic_overlap(t_res, l_res)
             critic_redundancy = critic_overlap >= 0.72
@@ -426,8 +435,7 @@ class IterationEngine:
                     extra_instruction=extra_instruction,
                 )
                 rerun_overlap = self._critic_overlap(t_res, rerun_logic)
-                state.track_cost("Logic Critic", self.runner.latest_call_cost("Logic Critic", rerun_logic_model))
-                state.record_model_usage("Logic Critic Recheck", rerun_logic_model, self.runner.latest_call_metadata("Logic Critic"))
+                self._record_role_call(state, "Logic Critic", "Logic Critic Recheck", rerun_logic_model)
                 if rerun_overlap < critic_overlap:
                     l_res = rerun_logic
                     l_model = rerun_logic_model
@@ -487,7 +495,15 @@ class IterationEngine:
             )
 
             # ── 5. Build critique message ────────────────────
-            critique_content = self._build_critique_html(t_score, l_score, avg_score, t_res, l_res, debate)
+            critique_content = self._build_critique_html(
+                t_score,
+                l_score,
+                avg_score,
+                t_res,
+                l_res,
+                debate,
+                raw_avg=raw_avg_score,
+            )
             state.add_message("Critics", critique_content)
 
             # ── 6. Save iteration record ─────────────────────
@@ -516,6 +532,7 @@ class IterationEngine:
                 logic_critique=l_res.get("critique", ""),
                 fix=f"Tech: {t_res.get('fix_suggestion','')} | Logic: {l_res.get('fix_suggestion','')}",
                 solution=proposal,
+                raw_avg_score=raw_avg_score,
                 tech_issues=t_res.get("issues", []),
                 logic_issues=l_res.get("issues", []),
                 tech_repair_contract=t_res.get("repair_contract", []),
@@ -571,6 +588,8 @@ class IterationEngine:
                 state.iteration_history[-1]["memory_consensus_score"] = record.memory_consensus_score
                 state.iteration_history[-1]["memory_reasons"] = record.memory_reasons
                 state.iteration_history[-1]["related_memory_ids"] = record.related_memory_ids
+            save_memory_entry_sync(memory_entry)
+            self._persist_iteration_record(run_id, record)
 
             # Optional UI callback
             if self.on_iteration_complete:
@@ -620,6 +639,14 @@ class IterationEngine:
             benchmark_case_id=state.benchmark_case_id,
             benchmark_case_title=state.benchmark_case_title,
         )
+        self._persist_run_summary(
+            run_id=run_id,
+            state=state,
+            reason=reason,
+            latest_validity=latest_validity,
+            latest_verification_status=latest_verification_status,
+            latest_ship_readiness=latest_ship_readiness,
+        )
 
         return ArbiterResult(
             best_solution=state.best_solution or state.current_solution,
@@ -660,43 +687,241 @@ class IterationEngine:
     def _build_janitor_payload(state: ArbiterState, proposal: str, preflight_issues: list, t_res: dict, l_res: dict) -> str:
         unresolved = getattr(state, "unresolved_issues", {"tech": [], "logic": []})
         tech_defects = (t_res.get("confirmed_defects") or [])[:4]
-        tech_risks = (t_res.get("risks") or [])[:3]
-        tech_improve = (t_res.get("improvements") or [])[:3]
         logic_defects = (l_res.get("confirmed_defects") or [])[:4]
-        logic_risks = (l_res.get("risks") or [])[:3]
-        logic_improve = (l_res.get("improvements") or [])[:3]
+        tech_fix = str(t_res.get("fix_suggestion", "") or "").strip()[:120]
+        logic_fix = str(l_res.get("fix_suggestion", "") or "").strip()[:120]
+        latest_solution = str(proposal or "").strip()
+        if len(latest_solution) > 800:
+            latest_solution = latest_solution[:800].rstrip() + "\n[truncated solution excerpt]"
+        tech_contract = [str(item).strip() for item in (t_res.get("repair_contract") or []) if str(item).strip()][:4]
+        logic_contract = [str(item).strip() for item in (l_res.get("repair_contract") or []) if str(item).strip()][:4]
+        unresolved_tech = [str(item).strip() for item in (unresolved.get("tech") or []) if str(item).strip()][:6]
+        unresolved_logic = [str(item).strip() for item in (unresolved.get("logic") or []) if str(item).strip()][:6]
+
+        def section(title: str, items: list[str], empty_text: str = "- None") -> str:
+            if not items:
+                return f"{title}:\n{empty_text}\n"
+            return title + ":\n" + "\n".join(f"- {item}" for item in items) + "\n"
+
         return (
             "TASK MODE:\n"
             f"{state.task_mode}\n\n"
             "LATEST SOLUTION:\n"
-            f"{proposal}\n\n"
-            "PREFLIGHT ISSUES:\n"
-            f"{preflight_issues}\n\n"
-            "TECH CONFIRMED DEFECTS:\n"
-            + "\n".join(f"- {item}" for item in tech_defects) + "\n\n"
-            "TECH RISKS:\n"
-            + "\n".join(f"- {item}" for item in tech_risks) + "\n\n"
-            "TECH IMPROVEMENTS:\n"
-            + "\n".join(f"- {item}" for item in tech_improve) + "\n\n"
-            "TECH CRITIC FINDINGS:\n"
-            f"Critique: {t_res.get('critique', '')}\n"
-            f"Fix suggestion: {t_res.get('fix_suggestion', '')}\n"
-            "Repair contract:\n"
-            + "\n".join(f"- {item}" for item in (t_res.get("repair_contract") or [])[:4]) + "\n\n"
-            "LOGIC CONFIRMED DEFECTS:\n"
-            + "\n".join(f"- {item}" for item in logic_defects) + "\n\n"
-            "LOGIC RISKS:\n"
-            + "\n".join(f"- {item}" for item in logic_risks) + "\n\n"
-            "LOGIC IMPROVEMENTS:\n"
-            + "\n".join(f"- {item}" for item in logic_improve) + "\n\n"
-            "LOGIC CRITIC FINDINGS:\n"
-            f"Critique: {l_res.get('critique', '')}\n"
-            f"Fix suggestion: {l_res.get('fix_suggestion', '')}\n"
-            "Repair contract:\n"
-            + "\n".join(f"- {item}" for item in (l_res.get("repair_contract") or [])[:4]) + "\n\n"
-            "PREVIOUS UNRESOLVED ISSUES:\n"
-            f"{unresolved}\n"
+            f"{latest_solution}\n\n"
+            + section("PREFLIGHT ISSUES", [str(item).strip() for item in preflight_issues if str(item).strip()])
+            + "\n"
+            + section("TECH CONFIRMED DEFECTS", tech_defects)
+            + f"TECH FIX SUGGESTION:\n- {tech_fix or 'No fix suggestion.'}\n"
+            + section("TECH REPAIR CONTRACT", tech_contract)
+            + "\n"
+            + section("LOGIC CONFIRMED DEFECTS", logic_defects)
+            + f"LOGIC FIX SUGGESTION:\n- {logic_fix or 'No fix suggestion.'}\n"
+            + section("LOGIC REPAIR CONTRACT", logic_contract)
+            + "\n"
+            + section("PREVIOUS UNRESOLVED TECH ISSUES", unresolved_tech)
+            + section("PREVIOUS UNRESOLVED LOGIC ISSUES", unresolved_logic)
         )
+
+    @staticmethod
+    def _persist_iteration_record(run_id: str, record: IterationRecord) -> None:
+        save_iteration_sync(
+            run_id,
+            {
+                "iteration_number": record.iter,
+                "tech_score": record.tech,
+                "logic_score": record.logic,
+                "avg_score": record.avg,
+                "ship_readiness": record.ship_readiness,
+                "verification_status": record.verification_status,
+                "verification_score": record.verification_score,
+                "architect_model": record.architect_model,
+                "tech_model": record.tech_model,
+                "logic_model": record.logic_model,
+                "preflight_issues": list(record.preflight_issues or []),
+                "tech_issues": list(record.tech_confirmed_defects or record.tech_issues or []),
+                "logic_issues": list(record.logic_confirmed_defects or record.logic_issues or []),
+                "janitor_summary": record.janitor_summary,
+                "solution": record.solution,
+            },
+        )
+
+    @staticmethod
+    def _persist_run_summary(
+        run_id: str,
+        state: ArbiterState,
+        reason: str,
+        latest_validity: str,
+        latest_verification_status: str,
+        latest_ship_readiness: str,
+    ) -> None:
+        save_run_sync(
+            {
+                "id": run_id,
+                "task_mode": state.task_mode,
+                "user_input": state.user_input,
+                "best_score": state.best_iteration["avg"] if state.best_iteration else state.last_avg_score,
+                "best_solution": state.best_solution or state.current_solution,
+                "iteration_count": state.iteration,
+                "total_cost_usd": state.costs.get("Total", 0.0),
+                "stop_reason": reason,
+                "ship_readiness": latest_ship_readiness,
+                "verification_status": latest_verification_status,
+                "validity_status": latest_validity,
+                "run_metadata": {
+                    "stable_mode": state.stable_mode,
+                    "benchmark_mode": state.benchmark_mode,
+                    "benchmark_strategy": state.benchmark_strategy,
+                    "benchmark_pack": state.benchmark_pack,
+                    "benchmark_case_id": state.benchmark_case_id,
+                    "benchmark_case_title": state.benchmark_case_title,
+                    "model_usage": state.model_usage[-25:],
+                    "preflight_events": state.preflight_events,
+                    "repair_events": state.repair_events,
+                },
+            }
+        )
+
+    @staticmethod
+    def _critic_timeout_result(role: str, timeout_seconds: int) -> dict:
+        critique = f"{role} timed out after {timeout_seconds}s before returning a review."
+        fix = "Retry the critic pass or switch to a more reliable model."
+        return {
+            "score": 1,
+            "critique": critique,
+            "fix_suggestion": fix,
+            "confirmed_defects": [],
+            "risks": [],
+            "improvements": [],
+            "issues": [critique],
+            "repair_contract": [fix],
+            "provider_error": True,
+            "error_type": "timeout",
+        }
+
+    @staticmethod
+    def _critic_execution_error_result(role: str, exc: Exception) -> dict:
+        message = f"{role} failed before returning a review: {str(exc).strip() or 'unknown execution error'}"
+        fix = "Retry the critic pass or switch to a different model."
+        return {
+            "score": 1,
+            "critique": message,
+            "fix_suggestion": fix,
+            "confirmed_defects": [],
+            "risks": [],
+            "improvements": [],
+            "issues": [message],
+            "repair_contract": [fix],
+            "provider_error": True,
+            "error_type": "execution_error",
+        }
+
+    @staticmethod
+    def _critic_failure_metadata(role: str, error_type: str, latency_ms: float = 0.0) -> dict:
+        return {
+            "provider": "",
+            "model": "",
+            "agent_name": role,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost_usd": 0.0,
+            "cost_method": error_type,
+            "cached": False,
+            "latency_ms": latency_ms,
+            "error_type": error_type,
+        }
+
+    def _record_role_call(self, state: ArbiterState, cost_role: str, usage_role: str, model: str) -> None:
+        state.track_cost(cost_role, self.runner.latest_call_cost(cost_role, model))
+        state.record_model_usage(usage_role, model, self.runner.latest_call_metadata(cost_role))
+
+    def _run_initial_critics(
+        self,
+        proposal: str,
+        context: dict,
+        run_id: str,
+        iteration: int,
+    ) -> tuple[dict, str, dict, str]:
+        if not SETTINGS.parallel_critics:
+            tech_result, tech_model = self.runner.run_tech_critic(proposal, context)
+            logic_result, logic_model = self.runner.run_logic_critic(proposal, context)
+            return tech_result, tech_model, logic_result, logic_model
+
+        timeout_seconds = max(1, int(getattr(SETTINGS, "critic_timeout_seconds", 45) or 45))
+        executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="arbiter-critic")
+        tech_future = executor.submit(self.runner.run_tech_critic, proposal, context)
+        logic_future = executor.submit(self.runner.run_logic_critic, proposal, context)
+
+        try:
+            try:
+                tech_result, tech_model = tech_future.result(timeout=timeout_seconds)
+            except FuturesTimeoutError:
+                tech_result, tech_model = self._critic_timeout_result("Tech Critic", timeout_seconds), ""
+                self.runner.set_call_metadata(
+                    "Tech Critic",
+                    self._critic_failure_metadata("Tech Critic", "timeout", timeout_seconds * 1000),
+                )
+                logger.warning(
+                    "critic_timeout",
+                    extra={
+                        "run_id": run_id,
+                        "iteration": iteration,
+                        "agent_name": "Tech Critic",
+                        "latency_ms": timeout_seconds * 1000,
+                    },
+                )
+            except Exception as exc:
+                tech_result, tech_model = self._critic_execution_error_result("Tech Critic", exc), ""
+                self.runner.set_call_metadata(
+                    "Tech Critic",
+                    self._critic_failure_metadata("Tech Critic", "execution_error"),
+                )
+                logger.warning(
+                    "critic_execution_error",
+                    extra={
+                        "run_id": run_id,
+                        "iteration": iteration,
+                        "agent_name": "Tech Critic",
+                    },
+                    exc_info=exc,
+                )
+
+            try:
+                logic_result, logic_model = logic_future.result(timeout=timeout_seconds)
+            except FuturesTimeoutError:
+                logic_result, logic_model = self._critic_timeout_result("Logic Critic", timeout_seconds), ""
+                self.runner.set_call_metadata(
+                    "Logic Critic",
+                    self._critic_failure_metadata("Logic Critic", "timeout", timeout_seconds * 1000),
+                )
+                logger.warning(
+                    "critic_timeout",
+                    extra={
+                        "run_id": run_id,
+                        "iteration": iteration,
+                        "agent_name": "Logic Critic",
+                        "latency_ms": timeout_seconds * 1000,
+                    },
+                )
+            except Exception as exc:
+                logic_result, logic_model = self._critic_execution_error_result("Logic Critic", exc), ""
+                self.runner.set_call_metadata(
+                    "Logic Critic",
+                    self._critic_failure_metadata("Logic Critic", "execution_error"),
+                )
+                logger.warning(
+                    "critic_execution_error",
+                    extra={
+                        "run_id": run_id,
+                        "iteration": iteration,
+                        "agent_name": "Logic Critic",
+                    },
+                    exc_info=exc,
+                )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        return tech_result, tech_model, logic_result, logic_model
 
     def _run_verification(
         self,
@@ -857,11 +1082,25 @@ class IterationEngine:
         return len(tech_tokens & logic_tokens) / len(tech_tokens | logic_tokens)
 
     @staticmethod
-    def _build_critique_html(t_score: int, l_score: int, avg: float, t_res: dict, l_res: dict, debate: Optional[dict] = None) -> str:
+    def _build_critique_html(
+        t_score: int,
+        l_score: int,
+        avg: float,
+        t_res: dict,
+        l_res: dict,
+        debate: Optional[dict] = None,
+        raw_avg: Optional[float] = None,
+    ) -> str:
         badge_cls = (
             "" if avg >= 7
             else "warning" if avg >= 5
             else "danger"
+        )
+        critic_average = float(raw_avg if raw_avg is not None else avg)
+        score_line = (
+            f"TECH: {t_score}/10 &nbsp;|&nbsp; LOGIC: {l_score}/10 "
+            f"&nbsp;|&nbsp; CRITIC AVG: {critic_average:.1f}/10 "
+            f"&nbsp;|&nbsp; FINAL: {avg:.1f}/10"
         )
         debate_block = ""
         if debate:
@@ -900,7 +1139,7 @@ class IterationEngine:
             )
         return f"""
 <div class="score-badge {badge_cls}">
-    TECH: {t_score}/10 &nbsp;|&nbsp; LOGIC: {l_score}/10 &nbsp;|&nbsp; AVG: {avg:.1f}/10
+    {score_line}
 </div><br>
 <b style='color:#00ffa3;'>Technical Audit:</b> {t_res.get('critique', 'No issues.')}{tech_issue_block}<br><br>
 <b style='color:#00ffa3;'>Logic Audit:</b> {l_res.get('critique', 'No issues.')}{logic_issue_block}<br>

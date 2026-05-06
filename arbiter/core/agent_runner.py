@@ -1,5 +1,4 @@
 from typing import Optional
-import logging
 
 from arbiter.agents.base_agent import (
     BaseAgent,
@@ -16,8 +15,9 @@ from arbiter.infra.performance_store import get_performance_store
 from arbiter.infra.decision_log import DecisionLog
 from arbiter.config.settings import PRICES, SETTINGS
 from arbiter.infra.plugin_registry import provider_for_model
+from arbiter.infra.structured_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class AgentRunner:
@@ -47,6 +47,7 @@ class AgentRunner:
                     "auditor_completed",
                     extra={
                         "iteration": self.current_iteration,
+                        "agent_name": "Auditor",
                         "model": model,
                         "provider": provider_for_model(model, ""),
                     },
@@ -70,6 +71,7 @@ class AgentRunner:
                     "architect_completed",
                     extra={
                         "iteration": self.current_iteration,
+                        "agent_name": "Architect",
                         "model": model,
                         "provider": provider_for_model(model, ""),
                     },
@@ -99,6 +101,7 @@ class AgentRunner:
                     "tech_critic_completed",
                     extra={
                         "iteration": self.current_iteration,
+                        "agent_name": "Tech Critic",
                         "model": model,
                         "provider": provider_for_model(model, ""),
                         "score": result.get("score", 1),
@@ -124,6 +127,7 @@ class AgentRunner:
                     "logic_critic_completed",
                     extra={
                         "iteration": self.current_iteration,
+                        "agent_name": "Logic Critic",
                         "model": model,
                         "provider": provider_for_model(model, ""),
                         "score": result.get("score", 1),
@@ -146,6 +150,7 @@ class AgentRunner:
                     "janitor_completed",
                     extra={
                         "iteration": self.current_iteration,
+                        "agent_name": "Janitor",
                         "model": model,
                         "provider": provider_for_model(model, ""),
                     },
@@ -258,6 +263,7 @@ class AgentRunner:
             "provider_cooldown_applied",
             extra={
                 "iteration": self.current_iteration,
+                "agent_name": "Model Selector",
                 "model": model,
                 "provider": provider_for_model(model, ""),
                 "error_type": error_type,
@@ -269,6 +275,9 @@ class AgentRunner:
 
     def latest_call_metadata(self, role: str) -> dict:
         return dict(self._last_call_metadata.get(role, {}))
+
+    def set_call_metadata(self, role: str, metadata: dict) -> None:
+        self._last_call_metadata[role] = dict(metadata or {})
 
     def latest_call_cost(self, role: str, fallback_model: str = "") -> float:
         metadata = self.latest_call_metadata(role)
