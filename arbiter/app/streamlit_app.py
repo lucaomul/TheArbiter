@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import re
 import html
 import json
@@ -21,14 +22,15 @@ from arbiter.models.state import ArbiterState
 from arbiter.config.settings import SETTINGS, TASK_PROFILES, PRICES
 from arbiter.infra.cache import get_cache
 from arbiter.infra.memory_store import get_memory_store
+from arbiter.infra.benchmark_suite import get_benchmark_packs, get_benchmark_cases, get_case_by_id
 from arbiter.app.ui_styles import UI_CSS
 
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 # ── Page config ─────────────────────────────────────────────
 st.set_page_config(
     page_title="The Arbiter | Luca Crăciun",
-    page_icon="⚔️",
+    page_icon="•",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -58,6 +60,12 @@ defaults = {
     "repair_events":     0,
     "model_usage":       [],
     "memory_stats":      {"count": 0, "task_modes": {}},
+    "benchmark_stats":   {"count": 0, "avg_score": 0.0, "avg_cost": 0.0, "avg_iterations": 0.0, "benchmark_runs": 0},
+    "benchmark_by_task_mode": {},
+    "benchmark_by_strategy": {},
+    "benchmark_by_case": {},
+    "recent_benchmarks": [],
+    "decision_trace":    [],
     "unresolved_issues": {"tech": [], "logic": []},
     "latest_janitor_report": {},
     "latest_result_status": "IDLE",
@@ -66,9 +74,19 @@ defaults = {
     "audit_status": "idle",
     "provider_lock": "groq",
     "stable_mode": True,
+    "benchmark_mode": False,
+    "benchmark_pack": get_benchmark_packs()[0],
+    "benchmark_case_id": "",
+    "benchmark_strategy": "arbiter_full_loop",
     "manual_feedback_enabled": False,
     "manual_feedback_text": "",
     "project_note_text": "",
+    "task_draft": "",
+    "pending_auto_run": False,
+    "run_in_progress": False,
+    "auto_mode_enabled": False,
+    "target_score_setting": 8,
+    "max_iterations_setting": 5,
     "model_preset": "Starter - Free Stable",
     "manual_model_selection": False,
     "selected_models": {
@@ -173,6 +191,21 @@ MODEL_PRESETS = {
 # ── Helpers ──────────────────────────────────────────────────
 def reset_run_state(keep_task_mode: bool = True):
     preserved_task_mode = st.session_state.task_mode if keep_task_mode else defaults["task_mode"]
+    preserved_ui = {
+        "provider_lock": st.session_state.provider_lock,
+        "stable_mode": st.session_state.stable_mode,
+        "benchmark_mode": st.session_state.benchmark_mode,
+        "benchmark_pack": st.session_state.benchmark_pack,
+        "benchmark_case_id": st.session_state.benchmark_case_id,
+        "benchmark_strategy": st.session_state.benchmark_strategy,
+        "model_preset": st.session_state.model_preset,
+        "manual_model_selection": st.session_state.manual_model_selection,
+        "selected_models": dict(st.session_state.selected_models),
+        "task_draft": st.session_state.task_draft,
+        "auto_mode_enabled": st.session_state.auto_mode_enabled,
+        "target_score_setting": st.session_state.target_score_setting,
+        "max_iterations_setting": st.session_state.max_iterations_setting,
+    }
     for key, value in defaults.items():
         if key == "task_mode":
             continue
@@ -183,6 +216,8 @@ def reset_run_state(keep_task_mode: bool = True):
         else:
             st.session_state[key] = value
     st.session_state.task_mode = preserved_task_mode
+    for key, value in preserved_ui.items():
+        st.session_state[key] = value
     st.session_state.audit_status = "idle"
 
 
@@ -247,6 +282,33 @@ def build_effective_manual_override() -> str:
     return janitor_context
 
 
+def get_case_flow_status() -> list[tuple[str, str]]:
+    step = st.session_state.step
+    run_in_progress = bool(st.session_state.run_in_progress)
+    has_result = bool(st.session_state.iteration_history) and not run_in_progress
+    audit_status = st.session_state.audit_status
+    latest_status = st.session_state.latest_result_status
+
+    intake = "active" if step in {"input", "audit", "clarification"} and not has_result else "done" if st.session_state.current_task else "idle"
+    architect = "active" if step == "negotiation" and run_in_progress else "done" if has_result else "idle"
+    critics = "active" if step == "negotiation" and run_in_progress else "done" if has_result else "idle"
+    janitor = "active" if step == "negotiation" and run_in_progress else "done" if has_result and st.session_state.latest_janitor_report else "idle"
+    verdict = "done" if has_result else "idle"
+
+    if audit_status == "needs_clarification":
+        intake = "warn"
+    if latest_status in {"DIAGNOSTIC ONLY", "REVIEW DEGRADED", "PROVIDER LIMITED"}:
+        verdict = "warn"
+
+    return [
+        ("Case Intake", intake),
+        ("Architect Draft", architect),
+        ("Counsel Debate", critics),
+        ("Janitor Brief", janitor),
+        ("Final Order", verdict),
+    ]
+
+
 def format_retry_after(seconds) -> str:
     try:
         total = max(0, int(float(seconds)))
@@ -278,6 +340,13 @@ def format_provider_error_message(raw: str) -> str:
         model = parsed.get("model") or "selected model"
         error_type = parsed.get("error_type") or "provider_error"
         retry_after = format_retry_after(parsed.get("retry_after_seconds"))
+        if not retry_after:
+            embedded = " ".join(
+                str(parsed.get(key, "") or "")
+                for key in ("critique", "error", "fix_suggestion")
+            )
+            retry_match = re.search(r"please try again in ([0-9hms\.\s]+)", embedded, re.IGNORECASE)
+            retry_after = retry_match.group(1).strip().rstrip(".") if retry_match else ""
         if error_type == "rate_limit":
             suffix = f" Available again in about {retry_after}." if retry_after else ""
             return f"{provider} rate limit reached for `{model}`.{suffix}"
@@ -297,6 +366,396 @@ def format_provider_error_message(raw: str) -> str:
         return f"{provider} rate limit reached for `{model}`.{suffix}"
 
     return text
+
+
+def normalize_visible_message(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+
+    parsed = None
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+
+    if isinstance(parsed, dict) and parsed.get("provider_error"):
+        primary = format_provider_error_message(text)
+        fix = str(parsed.get("fix_suggestion") or "").strip()
+        if fix and fix.lower() not in primary.lower():
+            return f"{primary} {fix}".strip()
+        return primary
+
+    return format_provider_error_message(text)
+
+
+def mask_text(text: str, visible: int = 140) -> str:
+    raw = " ".join(str(text or "").split())
+    if len(raw) <= visible:
+        return "*" * max(len(raw), 12)
+    head = raw[: visible // 2]
+    tail = raw[-(visible // 2):]
+    hidden_len = max(len(raw) - len(head) - len(tail), 24)
+    return f"{head} {'*' * min(hidden_len, 120)} {tail}"
+
+
+def render_summary_cards(items):
+    cards = []
+    for label, value in items:
+        cards.append(
+            "<div class='summary-card'>"
+            f"<div class='summary-card-label'>{html.escape(str(label))}</div>"
+            f"<div class='summary-card-value'>{html.escape(str(value))}</div>"
+            "</div>"
+        )
+    st.markdown("<div class='summary-grid'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
+def render_case_flow_panel():
+    flow = get_case_flow_status()
+    blocks = []
+    for label, status in flow:
+        css = {
+            "done": "court-chip done",
+            "active": "court-chip active",
+            "warn": "court-chip warn",
+            "idle": "court-chip",
+        }.get(status, "court-chip")
+        readable = {
+            "done": "Done",
+            "active": "Running",
+            "warn": "Attention",
+            "idle": "Waiting",
+        }.get(status, "Waiting")
+        blocks.append(
+            "<div class='court-step'>"
+            f"<div class='court-flow-label'>{html.escape(label)}</div>"
+            f"<span class='{css}'>{readable}</span>"
+            "</div>"
+        )
+    st.markdown(
+        "<div class='court-flow'>" + "".join(blocks) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_deliberation_scene():
+    flow_map = dict(get_case_flow_status())
+    step = st.session_state.step
+    audit_status = st.session_state.audit_status
+    run_in_progress = bool(st.session_state.run_in_progress)
+    has_result = bool(st.session_state.iteration_history) and not run_in_progress
+    pipeline_running = step == "negotiation" and run_in_progress
+    auditor_only = step in {"input", "audit", "clarification"} and not run_in_progress and not has_result
+
+    architect_status = flow_map.get("Architect Draft", "idle")
+    critics_status = flow_map.get("Counsel Debate", "idle")
+    janitor_status = flow_map.get("Janitor Brief", "idle")
+    verdict_status = flow_map.get("Final Order", "idle")
+    auditor_status = (
+        "warn" if audit_status == "needs_clarification"
+        else "done" if audit_status == "passed"
+        else "active" if step == "audit"
+        else "idle"
+    )
+
+    def scene_state_css(status: str) -> str:
+        return {
+            "done": "scene-done",
+            "active": "scene-active",
+            "warn": "scene-warn",
+            "idle": "scene-idle",
+        }.get(status, "scene-idle")
+
+    def scene_badge(status: str) -> str:
+        return {
+            "done": "Settled",
+            "active": "In motion",
+            "warn": "Needs revision",
+            "idle": "Standing by",
+        }.get(status, "Standing by")
+
+    janitor_note = "Consolidating the dispute into one cleaner retry brief."
+    if janitor_status == "done" and verdict_status == "warn":
+        janitor_note = "Cleanup completed, but the order still needs another pass."
+    elif janitor_status == "done":
+        janitor_note = "Cleanup complete and ready for the final order."
+
+    auditor_note = "Reading the case brief and checking whether the request has enough context."
+    if auditor_status == "done":
+        auditor_note = "Context approved. The case can move straight into deliberation."
+    elif auditor_status == "warn":
+        auditor_note = "More context is required before the case can move forward."
+
+    def scene_card(title: str, eyebrow: str, badge_status: str, note: str, body_html: str) -> str:
+        return (
+            f"<div class='arb-figure-card {scene_state_css(badge_status)}'>"
+            "<div class='arb-figure-topline'>"
+            f"<span class='arb-figure-eyebrow'>{html.escape(eyebrow)}</span>"
+            f"<span class='arb-figure-badge'>{html.escape(scene_badge(badge_status))}</span>"
+            "</div>"
+            f"<div class='arb-figure-title'>{html.escape(title)}</div>"
+            f"<div class='arb-figure-stage'>{body_html}</div>"
+            f"<div class='arb-figure-note'>{html.escape(note)}</div>"
+            "</div>"
+        )
+
+    architect_svg = """
+    <svg class='arb-figure-svg architect-svg' viewBox='0 0 320 180' aria-hidden='true'>
+        <rect x='184' y='28' width='96' height='82' rx='8' class='board-frame'></rect>
+        <rect x='194' y='38' width='76' height='62' rx='5' class='board-surface'></rect>
+        <line x1='196' y1='110' x2='188' y2='154' class='board-leg'></line>
+        <line x1='276' y1='110' x2='284' y2='154' class='board-leg'></line>
+        <path d='M208 58 L244 72 L216 88' class='board-sketch'></path>
+        <path d='M222 52 L256 62 L248 90' class='board-sketch board-sketch-soft'></path>
+        <circle cx='86' cy='58' r='14' class='figure-stroke'></circle>
+        <line x1='86' y1='72' x2='86' y2='116' class='figure-stroke'></line>
+        <line x1='86' y1='84' x2='66' y2='104' class='figure-stroke'></line>
+        <line x1='86' y1='84' x2='104' y2='96' class='figure-stroke'></line>
+        <line x1='86' y1='116' x2='70' y2='148' class='figure-stroke'></line>
+        <line x1='86' y1='116' x2='102' y2='148' class='figure-stroke'></line>
+        <g class='drawing-arm'>
+            <line x1='86' y1='84' x2='126' y2='78' class='figure-stroke'></line>
+            <line x1='126' y1='78' x2='172' y2='74' class='figure-stroke'></line>
+            <circle cx='174' cy='74' r='3.5' class='pen-tip'></circle>
+        </g>
+        <path d='M172 74 C188 66, 200 62, 214 60' class='draw-trace'></path>
+        <path d='M176 80 C196 86, 210 90, 226 92' class='draw-trace draw-trace-2'></path>
+        <line x1='26' y1='154' x2='298' y2='154' class='ground-line'></line>
+    </svg>
+    """
+
+    critics_svg = """
+    <svg class='arb-figure-svg critics-svg' viewBox='0 0 320 180' aria-hidden='true'>
+        <g class='critic critic-left'>
+            <circle cx='82' cy='64' r='14' class='figure-stroke'></circle>
+            <line x1='82' y1='78' x2='82' y2='120' class='figure-stroke'></line>
+            <line x1='82' y1='90' x2='60' y2='106' class='figure-stroke'></line>
+            <line x1='82' y1='90' x2='108' y2='92' class='figure-stroke'></line>
+            <line x1='82' y1='120' x2='68' y2='150' class='figure-stroke'></line>
+            <line x1='82' y1='120' x2='96' y2='150' class='figure-stroke'></line>
+        </g>
+        <g class='critic critic-right'>
+            <circle cx='238' cy='64' r='14' class='figure-stroke'></circle>
+            <line x1='238' y1='78' x2='238' y2='120' class='figure-stroke'></line>
+            <line x1='238' y1='90' x2='214' y2='92' class='figure-stroke'></line>
+            <line x1='238' y1='90' x2='258' y2='108' class='figure-stroke'></line>
+            <line x1='238' y1='120' x2='224' y2='150' class='figure-stroke'></line>
+            <line x1='238' y1='120' x2='252' y2='150' class='figure-stroke'></line>
+        </g>
+        <g class='bubble bubble-left'>
+            <rect x='36' y='18' width='92' height='30' rx='12' class='speech-bubble'></rect>
+            <path d='M90 48 L82 58 L104 48' class='speech-tail'></path>
+            <line x1='52' y1='31' x2='108' y2='31' class='speech-line'></line>
+            <line x1='52' y1='38' x2='94' y2='38' class='speech-line'></line>
+        </g>
+        <g class='bubble bubble-right'>
+            <rect x='190' y='18' width='92' height='30' rx='12' class='speech-bubble'></rect>
+            <path d='M230 48 L246 58 L242 48' class='speech-tail'></path>
+            <line x1='206' y1='31' x2='262' y2='31' class='speech-line'></line>
+            <line x1='206' y1='38' x2='248' y2='38' class='speech-line'></line>
+        </g>
+        <line x1='24' y1='154' x2='296' y2='154' class='ground-line'></line>
+    </svg>
+    """
+
+    janitor_svg = """
+    <svg class='arb-figure-svg janitor-svg' viewBox='0 0 320 180' aria-hidden='true'>
+        <circle cx='88' cy='58' r='14' class='figure-stroke'></circle>
+        <line x1='88' y1='72' x2='88' y2='116' class='figure-stroke'></line>
+        <line x1='88' y1='84' x2='66' y2='100' class='figure-stroke'></line>
+        <line x1='88' y1='84' x2='72' y2='94' class='figure-stroke'></line>
+        <line x1='88' y1='116' x2='72' y2='148' class='figure-stroke'></line>
+        <line x1='88' y1='116' x2='102' y2='148' class='figure-stroke'></line>
+        <g class='broom-arm'>
+            <line x1='88' y1='84' x2='126' y2='96' class='figure-stroke'></line>
+            <line x1='126' y1='96' x2='182' y2='132' class='figure-stroke broom-stick'></line>
+            <path d='M182 132 L208 126 L212 142 L186 148 Z' class='broom-head'></path>
+        </g>
+        <g class='dust dust-one'>
+            <circle cx='232' cy='142' r='4'></circle>
+            <circle cx='244' cy='138' r='3'></circle>
+            <circle cx='256' cy='144' r='5'></circle>
+        </g>
+        <g class='dust dust-two'>
+            <circle cx='220' cy='146' r='3'></circle>
+            <circle cx='236' cy='148' r='4'></circle>
+            <circle cx='252' cy='150' r='3'></circle>
+        </g>
+        <line x1='26' y1='154' x2='298' y2='154' class='ground-line'></line>
+    </svg>
+    """
+
+    auditor_svg = """
+    <svg class='arb-figure-svg auditor-svg' viewBox='0 0 320 180' aria-hidden='true'>
+        <circle cx='104' cy='58' r='14' class='figure-stroke'></circle>
+        <line x1='104' y1='72' x2='104' y2='116' class='figure-stroke'></line>
+        <line x1='104' y1='84' x2='84' y2='104' class='figure-stroke'></line>
+        <line x1='104' y1='116' x2='90' y2='148' class='figure-stroke'></line>
+        <line x1='104' y1='116' x2='118' y2='148' class='figure-stroke'></line>
+        <g class='reader-arm'>
+            <line x1='104' y1='84' x2='138' y2='88' class='figure-stroke'></line>
+            <line x1='138' y1='88' x2='174' y2='92' class='figure-stroke'></line>
+        </g>
+        <rect x='170' y='56' width='68' height='82' rx='8' class='paper-sheet'></rect>
+        <line x1='184' y1='78' x2='222' y2='78' class='paper-line'></line>
+        <line x1='184' y1='90' x2='226' y2='90' class='paper-line'></line>
+        <line x1='184' y1='102' x2='214' y2='102' class='paper-line'></line>
+        <line x1='184' y1='114' x2='224' y2='114' class='paper-line'></line>
+        <g class='approve-mark'>
+            <circle cx='258' cy='52' r='16' class='mark-ring'></circle>
+            <path d='M250 52 L257 59 L270 45' class='mark-stroke'></path>
+        </g>
+        <g class='reject-mark'>
+            <circle cx='258' cy='52' r='16' class='mark-ring'></circle>
+            <line x1='250' y1='44' x2='266' y2='60' class='mark-stroke'></line>
+            <line x1='266' y1='44' x2='250' y2='60' class='mark-stroke'></line>
+        </g>
+        <line x1='26' y1='154' x2='298' y2='154' class='ground-line'></line>
+    </svg>
+    """
+
+    scene_css = """
+    <style>
+    .arb-scene-wrap { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:0 0 24px; }
+    .arb-scene-wrap.auditor-only { grid-template-columns:minmax(0,1fr); max-width:none; }
+    .arb-figure-card { position:relative; display:flex; flex-direction:column; min-height:320px; padding:18px 18px 16px; border-radius:20px; background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(247,247,245,.98)); border:1px solid #ddddda; box-shadow:0 12px 30px rgba(0,0,0,.05); overflow:hidden; box-sizing:border-box; }
+    .arb-figure-card::before { content:""; position:absolute; inset:0 auto auto 0; width:100%; height:2px; background:#111111; opacity:.08; }
+    .arb-figure-card.scene-active { border-color:#111111; box-shadow:0 16px 34px rgba(0,0,0,.10); }
+    .arb-figure-card.scene-warn { border-color:#9c9c96; background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(242,242,239,.98)); }
+    .arb-figure-topline { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+    .arb-figure-eyebrow { color:#666666; text-transform:uppercase; letter-spacing:.08em; font-size:.7rem; font-weight:700; line-height:1.2; }
+    .arb-figure-badge { display:inline-flex; align-items:center; justify-content:center; min-height:28px; padding:5px 10px; border-radius:999px; background:#efefec; border:1px solid #d6d6d1; color:#444444; font-size:.74rem; font-weight:700; white-space:nowrap; line-height:1; }
+    .arb-figure-card.scene-active .arb-figure-badge { background:#111111; border-color:#111111; color:#ffffff; }
+    .arb-figure-card.scene-warn .arb-figure-badge { background:#d9d9d4; border-color:#bdbdb7; color:#111111; }
+    .arb-figure-title { color:#0a0a0a; font-size:1rem; font-weight:700; line-height:1.3; margin:0 0 14px; }
+    .arb-figure-stage { position:relative; min-height:176px; border-radius:16px; background:linear-gradient(180deg,#f7f7f5,#f1f1ee); border:1px solid #e1e1dc; overflow:hidden; margin-bottom:14px; flex:0 0 auto; }
+    .arb-figure-note { color:#555555; font-size:.9rem; line-height:1.6; margin-top:auto; }
+    .arb-figure-svg { display:block; width:100%; height:176px; }
+    .arb-figure-svg .figure-stroke, .arb-figure-svg .board-frame, .arb-figure-svg .board-leg, .arb-figure-svg .ground-line, .arb-figure-svg .speech-tail, .arb-figure-svg .speech-line, .arb-figure-svg .board-sketch, .arb-figure-svg .draw-trace, .arb-figure-svg .broom-stick, .arb-figure-svg .paper-line, .arb-figure-svg .mark-stroke { fill:none; stroke:#111111; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }
+    .arb-figure-svg .board-surface, .arb-figure-svg .speech-bubble, .arb-figure-svg .paper-sheet, .arb-figure-svg .mark-ring { fill:rgba(255,255,255,.86); stroke:#111111; stroke-width:3; }
+    .arb-figure-svg .paper-line { opacity:.55; stroke-width:3; }
+    .arb-figure-svg .board-sketch-soft { opacity:.45; }
+    .arb-figure-svg .pen-tip, .arb-figure-svg .broom-head, .arb-figure-svg .dust circle { fill:#111111; }
+    .arb-figure-svg .draw-trace, .arb-figure-svg .draw-trace-2 { stroke-width:3; stroke-dasharray:42; stroke-dashoffset:42; }
+    .architect-svg .drawing-arm, .critics-svg .critic-left, .critics-svg .critic-right { transform-box:fill-box; transform-origin:center; }
+    .architect-svg .drawing-arm { transform-origin:86px 84px; }
+    .critics-svg .critic-left { transform-origin:82px 100px; }
+    .critics-svg .critic-right { transform-origin:238px 100px; }
+    .janitor-svg .broom-arm { transform-origin:88px 84px; }
+    .auditor-svg .reader-arm { transform-origin:104px 84px; }
+    .pipeline-live .architect-svg { opacity:1; }
+    .pipeline-live .critics-svg { opacity:.18; }
+    .pipeline-live .janitor-svg { opacity:.16; }
+    .critics-svg .bubble { opacity:.16; }
+    .janitor-svg .dust { opacity:.16; }
+    .auditor-svg .approve-mark, .auditor-svg .reject-mark { opacity:0; }
+    @keyframes architect-draw { 0%,10%,100% { transform:rotate(-8deg); } 18% { transform:rotate(5deg); } 28% { transform:rotate(-6deg); } 33%,100% { transform:rotate(-8deg); } }
+    @keyframes draw-trace { 0% { stroke-dashoffset:42; opacity:0; } 8% { opacity:.2; } 22% { stroke-dashoffset:0; opacity:1; } 30% { stroke-dashoffset:0; opacity:.35; } 33%,100% { stroke-dashoffset:0; opacity:0; } }
+    @keyframes argue-left { 0%,33% { transform:rotate(0deg) translateY(0); } 43% { transform:rotate(-3deg) translateY(-1px); } 53% { transform:rotate(4deg) translateY(-2px); } 63% { transform:rotate(-2deg) translateY(0); } 66%,100% { transform:rotate(0deg) translateY(0); } }
+    @keyframes argue-right { 0%,33% { transform:rotate(0deg) translateY(0); } 43% { transform:rotate(3deg) translateY(-1px); } 53% { transform:rotate(-4deg) translateY(-2px); } 63% { transform:rotate(2deg) translateY(0); } 66%,100% { transform:rotate(0deg) translateY(0); } }
+    @keyframes bubble-left { 0%,33%,100% { opacity:.14; transform:translateY(0); } 38%,48% { opacity:1; transform:translateY(-3px); } 55%,100% { opacity:.14; transform:translateY(0); } }
+    @keyframes bubble-right { 0%,46%,100% { opacity:.14; transform:translateY(0); } 52%,62% { opacity:1; transform:translateY(-3px); } 66%,100% { opacity:.14; transform:translateY(0); } }
+    @keyframes janitor-arm { 0%,66%,100% { transform:rotate(0deg); } 76% { transform:rotate(6deg); } 88% { transform:rotate(-8deg); } }
+    @keyframes dust-shift-one { 0%,66% { transform:translateX(0); opacity:.08; } 76% { transform:translateX(-10px); opacity:.5; } 88% { transform:translateX(-18px); opacity:.82; } 100% { transform:translateX(0); opacity:.08; } }
+    @keyframes dust-shift-two { 0%,66% { transform:translateX(0); opacity:.08; } 80% { transform:translateX(-6px); opacity:.34; } 92% { transform:translateX(-10px); opacity:.62; } 100% { transform:translateX(0); opacity:.08; } }
+    @keyframes auditor-arm { 0%,100% { transform:rotate(0deg); } 50% { transform:rotate(4deg); } }
+    @keyframes mark-pop { 0%,100% { opacity:.24; transform:scale(.94); } 50% { opacity:1; transform:scale(1); } }
+    @keyframes architect-presence { 0%,33% { opacity:1; } 36%,100% { opacity:.28; } }
+    @keyframes critics-presence { 0%,33% { opacity:.18; } 38%,66% { opacity:1; } 70%,100% { opacity:.22; } }
+    @keyframes janitor-presence { 0%,66% { opacity:.16; } 72%,100% { opacity:1; } }
+    .pipeline-live .architect-svg { animation:architect-presence 3.6s linear infinite; }
+    .pipeline-live .critics-svg { animation:critics-presence 3.6s linear infinite; }
+    .pipeline-live .janitor-svg { animation:janitor-presence 3.6s linear infinite; }
+    .pipeline-live .architect-svg .drawing-arm { animation:architect-draw 3.6s ease-in-out infinite; }
+    .pipeline-live .architect-svg .draw-trace { animation:draw-trace 3.6s linear infinite; }
+    .pipeline-live .architect-svg .draw-trace-2 { animation:draw-trace 3.6s linear infinite .15s; }
+    .pipeline-live .critics-svg .critic-left { animation:argue-left 3.6s ease-in-out infinite; }
+    .pipeline-live .critics-svg .critic-right { animation:argue-right 3.6s ease-in-out infinite; }
+    .pipeline-live .critics-svg .bubble-left { animation:bubble-left 3.6s ease-in-out infinite; }
+    .pipeline-live .critics-svg .bubble-right { animation:bubble-right 3.6s ease-in-out infinite; }
+    .pipeline-live .janitor-svg .broom-arm { animation:janitor-arm 3.6s ease-in-out infinite; }
+    .pipeline-live .janitor-svg .dust-one { animation:dust-shift-one 3.6s ease-in-out infinite; }
+    .pipeline-live .janitor-svg .dust-two { animation:dust-shift-two 3.6s ease-in-out infinite; }
+    .arb-figure-card.scene-active .auditor-svg .reader-arm { animation:auditor-arm 1.2s ease-in-out infinite; }
+    .arb-figure-card.scene-done .auditor-svg .approve-mark { opacity:1; animation:mark-pop 1.4s ease-in-out infinite; }
+    .arb-figure-card.scene-warn .auditor-svg .reject-mark { opacity:1; animation:mark-pop 1.4s ease-in-out infinite; }
+    @media (max-width:760px) { .arb-scene-wrap { grid-template-columns:repeat(2,minmax(0,1fr)); } .arb-scene-wrap.auditor-only { grid-template-columns:minmax(0,1fr); max-width:none; } .arb-figure-card { min-height:284px; } }
+    @media (max-width:560px) { .arb-scene-wrap { grid-template-columns:1fr; } }
+    @media (prefers-reduced-motion:reduce) { .arb-scene-wrap *, .arb-scene-wrap *::before, .arb-scene-wrap *::after { animation:none !important; transition:none !important; } }
+    </style>
+    """
+
+    scene_html = scene_css
+    if auditor_only:
+        scene_html += "<div class='arb-scene-wrap auditor-only'>"
+        scene_html += scene_card(
+            "Reading the case brief",
+            "Auditor",
+            auditor_status,
+            auditor_note,
+            auditor_svg,
+        )
+    else:
+        live_class = " pipeline-live" if pipeline_running else ""
+        scene_html += f"<div class='arb-scene-wrap{live_class}'>"
+        scene_html += scene_card(
+            "Drafting the case",
+            "Architect",
+            architect_status,
+            "Building structure, logic, and executable detail.",
+            architect_svg,
+        )
+        scene_html += scene_card(
+            "Contesting the draft",
+            "Counsel",
+            critics_status,
+            "Technical and logical counsel pressure-test the build.",
+            critics_svg,
+        )
+        scene_html += scene_card(
+            "Resolving the brief",
+            "Janitor",
+            janitor_status,
+            janitor_note,
+            janitor_svg,
+        )
+    scene_html += "</div>"
+    components.html(scene_html, height=420 if auditor_only else 430, scrolling=False)
+
+
+def render_product_header():
+    st.title("The Arbiter")
+    st.caption(
+        "A multi-agent workspace where the architect drafts, counsel reviews, and the janitor resolves the brief into a cleaner final answer."
+    )
+
+
+def render_intelligence_signals():
+    if not st.session_state.iteration_history:
+        return
+
+    latest = st.session_state.iteration_history[-1]
+    janitor = st.session_state.latest_janitor_report or {}
+    memory_stats = st.session_state.memory_stats or {}
+    similar_cases_used = "YES" if memory_stats.get("count", 0) > 0 else "NO"
+    st.markdown("##### Intelligence Signals")
+    render_summary_cards(
+        [
+            ("Learning State", "ACTIVE" if st.session_state.iteration > 1 else "INITIAL"),
+            ("Confidence", str(latest.get("review_confidence", "normal")).upper()),
+            ("Similar Cases", similar_cases_used),
+            ("Janitor Source", "READY" if janitor.get("repair_brief") else "LIGHT"),
+        ]
+    )
+    st.caption(
+        f"Verification: {str(latest.get('verification_status', 'UNVERIFIED')).upper()} · "
+        f"Adaptive state: {'stable' if st.session_state.stable_mode else 'adaptive'} · "
+        f"Retries this run: {max(st.session_state.iteration - 1, 0)} · "
+        f"Preflight events: {st.session_state.preflight_events} · "
+        f"Repair events: {st.session_state.repair_events}"
+    )
 
 
 def detect_code_language(raw: str) -> str:
@@ -325,7 +784,7 @@ def render_architect_content(content: str):
     - Code blocks → st.code() with line numbers (preserves styling)
     - Prose → styled notes panel
     """
-    raw = html.unescape(str(content)).strip()
+    raw = html.unescape(normalize_visible_message(content)).strip()
     raw = re.sub(r"^(?:JAVASCRIPT|JavaScript|JS)\s*:?[\n ]+", "", raw)
     raw = re.sub(r"(?im)^.*\[object Object\].*$", "", raw)
     raw = re.sub(r"\n{3,}", "\n\n", raw).strip()
@@ -400,9 +859,9 @@ def render_architect_content(content: str):
 
 def render_message(role: str, content: str):
     role_color = (
-        "#ffaa00" if role == "Auditor"
-        else "#ffffff" if role == "Architect"
-        else "#00ffa3"
+        "#8b5e1a" if role == "Auditor"
+        else "#0f1b2d" if role == "Architect"
+        else "#1f5eff"
     )
     if role == "Architect":
         render_architect_content(content)
@@ -410,12 +869,49 @@ def render_message(role: str, content: str):
     if role == "Critics":
         return
 
+    safe_content = html.escape(normalize_visible_message(content)).replace("\n", "<br>")
     st.markdown(f"""
     <div class="agent-card">
         <b style="color:{role_color};text-transform:uppercase;letter-spacing:2px;font-size:0.8rem;">{role}</b>
-        <div style="margin-top:15px;line-height:1.6;">{content}</div>
+        <div style="margin-top:15px;line-height:1.6;">{safe_content}</div>
     </div>
     """, unsafe_allow_html=True)
+
+
+def get_latest_message(role: str) -> str:
+    for message in reversed(st.session_state.messages):
+        if message.get("role") == role:
+            return str(message.get("content", "") or "")
+    return ""
+
+
+def render_auditor_surface():
+    auditor_message = normalize_visible_message(get_latest_message("Auditor"))
+    if st.session_state.audit_status == "needs_clarification" or st.session_state.pending_questions:
+        with st.container(border=True):
+            st.subheader("Auditor Intake")
+            st.caption("The auditor is asking for more context before the case proceeds.")
+            if auditor_message:
+                st.write(auditor_message)
+            elif st.session_state.pending_questions:
+                for question in st.session_state.pending_questions:
+                    st.markdown(f"- {question}")
+    elif st.session_state.audit_status == "passed":
+        with st.container(border=True):
+            st.subheader("Auditor Intake")
+            st.success("The brief is specific enough to proceed.")
+            cleaned = str(auditor_message or "").strip().lower()
+            if auditor_message and "specific enough to proceed" not in cleaned and "check passed" not in cleaned:
+                st.write(auditor_message)
+
+
+def render_architect_surface():
+    architect_message = get_latest_message("Architect") or st.session_state.current_solution
+    if not architect_message:
+        return
+    with st.container(border=True):
+        st.subheader("Architect Draft")
+        render_architect_content(architect_message)
 
 
 def sync_state_from_result(result):
@@ -446,10 +942,355 @@ def sync_state_from_result(result):
     st.session_state.repair_events = result.debug_info.get("repair_events", 0)
     st.session_state.model_usage = result.debug_info.get("model_usage", [])
     st.session_state.memory_stats = result.debug_info.get("memory_stats", {"count": 0, "task_modes": {}})
+    st.session_state.benchmark_stats = result.debug_info.get("benchmark_stats", {"count": 0, "avg_score": 0.0, "avg_cost": 0.0, "avg_iterations": 0.0, "benchmark_runs": 0})
+    st.session_state.benchmark_by_task_mode = result.debug_info.get("benchmark_by_task_mode", {})
+    st.session_state.benchmark_by_strategy = result.debug_info.get("benchmark_by_strategy", {})
+    st.session_state.benchmark_by_case = result.debug_info.get("benchmark_by_case", {})
+    st.session_state.recent_benchmarks = result.debug_info.get("recent_benchmarks", [])
+    st.session_state.decision_trace = result.debug_info.get("decision_trace", [])
     st.session_state.unresolved_issues = result.debug_info.get("unresolved_issues", {"tech": [], "logic": []})
     st.session_state.latest_janitor_report = result.debug_info.get("latest_janitor_report", {})
     st.session_state.latest_result_status = result.debug_info.get("latest_result_status", "VALID")
     st.session_state.run_id = result.debug_info.get("run_id", "")
+
+
+def execute_deliberation_run(auto_mode: bool, target_score: float, max_iterations: int, manual_override: str):
+    st.session_state.run_in_progress = True
+    try:
+        with st.spinner("Running intelligence pipeline..."):
+            orchestrator = ArbiterOrchestrator(
+                task_mode=st.session_state.task_mode,
+                auto_mode=auto_mode,
+                target_score=target_score,
+                max_iterations=max_iterations,
+                stable_mode=st.session_state.stable_mode,
+                benchmark_mode=st.session_state.benchmark_mode,
+                benchmark_strategy=st.session_state.benchmark_strategy if st.session_state.benchmark_mode else "",
+                benchmark_pack=st.session_state.benchmark_pack if st.session_state.benchmark_mode else "",
+                benchmark_case_id=st.session_state.benchmark_case_id if st.session_state.benchmark_mode else "",
+                benchmark_case_title=(get_case_by_id(st.session_state.benchmark_case_id) or {}).get("title", "") if st.session_state.benchmark_mode else "",
+            )
+            result = orchestrator.run(
+                user_input=st.session_state.current_task,
+                clarification="already_audited",
+                manual_override=manual_override,
+            )
+        sync_state_from_result(result)
+        st.session_state.retry_override = ""
+    finally:
+        st.session_state.run_in_progress = False
+
+
+def get_runtime_health_snapshot() -> dict:
+    memory_store = get_memory_store()
+    issues = []
+    checks = {
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "memory_entries_ready": (PROJECT_ROOT / ".arbiter_memory" / "memory_entries.jsonl").exists(),
+        "project_notes_ready": (PROJECT_ROOT / ".arbiter_memory" / "project_notes.json").exists(),
+        "project_notes_api": hasattr(memory_store, "retrieve_project_notes") and hasattr(memory_store, "add_project_note"),
+        "memory_governance_api": hasattr(memory_store, "recent_entries") and hasattr(memory_store, "set_memory_lifecycle"),
+        "decision_trace_ready": isinstance(st.session_state.decision_trace, list),
+        "benchmark_suite_ready": bool(get_benchmark_packs()),
+    }
+    if not checks["memory_entries_ready"]:
+        issues.append("Persistent memory file is missing.")
+    if not checks["project_notes_ready"]:
+        issues.append("Project notes file is missing.")
+    if not checks["project_notes_api"]:
+        issues.append("Project-notes API is not fully loaded. A full restart may be needed.")
+    if not checks["memory_governance_api"]:
+        issues.append("Memory governance controls are not fully loaded. A full restart may be needed.")
+    if not checks["benchmark_suite_ready"]:
+        issues.append("Benchmark suite could not load any benchmark scenarios.")
+    overall = "HEALTHY" if not issues else "ATTENTION"
+    return {"overall": overall, "checks": checks, "issues": issues}
+
+
+def render_health_and_decisions():
+    snapshot = get_runtime_health_snapshot()
+    st.markdown("#### System Health")
+    top = st.columns(4)
+    top[0].metric("Runtime", snapshot["overall"])
+    top[1].metric("Python", snapshot["checks"]["python"])
+    top[2].metric(
+        "Memory",
+        "READY" if snapshot["checks"]["memory_entries_ready"] and snapshot["checks"]["project_notes_ready"] else "CHECK",
+    )
+    top[3].metric(
+        "Governance API",
+        "READY" if snapshot["checks"]["memory_governance_api"] else "RESTART",
+    )
+
+    providers = st.columns(4)
+    providers[0].metric("Groq", "YES" if os.getenv("GROQ_API_KEY") else "NO")
+    providers[1].metric("OpenAI", "YES" if os.getenv("OPENAI_API_KEY") else "NO")
+    providers[2].metric("Gemini", "YES" if os.getenv("GEMINI_API_KEY") else "NO")
+    providers[3].metric("Claude", "YES" if os.getenv("ANTHROPIC_API_KEY") else "NO")
+
+    if snapshot["issues"]:
+        st.warning("Runtime health needs attention.")
+        for issue in snapshot["issues"]:
+            st.markdown(f"- {issue}")
+    else:
+        st.caption("Runtime health checks passed. Memory, benchmark, and governance features are loaded.")
+
+    st.markdown("#### Decision Trace")
+    if st.session_state.decision_trace:
+        for item in st.session_state.decision_trace[-8:]:
+            st.markdown(
+                f"- **{item.get('category', 'decision')}** · {item.get('summary', '')}  "
+                f"`({item.get('confidence', 'n/a')})`"
+            )
+            if item.get("reason"):
+                st.caption(item.get("reason"))
+    else:
+        st.caption("No decision trace recorded yet.")
+
+
+def render_benchmark_panel():
+    stats = st.session_state.benchmark_stats or {}
+    st.markdown("#### Benchmark Overview")
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Stored Runs", stats.get("count", 0))
+    metric_cols[1].metric("Avg Score", stats.get("avg_score", 0.0))
+    metric_cols[2].metric("Avg Cost", f"${stats.get('avg_cost', 0.0):.4f}")
+    metric_cols[3].metric("Avg Iters", stats.get("avg_iterations", 0.0))
+    metric_cols[4].metric("Bench Runs", stats.get("benchmark_runs", 0))
+
+    quality_cols = st.columns(4)
+    quality_cols[0].metric("Valid Runs", stats.get("valid_runs", 0))
+    quality_cols[1].metric("Valid Rate", f"{stats.get('valid_rate', 0.0)}%")
+    quality_cols[2].metric("Verified Rate", f"{stats.get('verified_rate', 0.0)}%")
+    quality_cols[3].metric("Ready Rate", f"{stats.get('ready_rate', 0.0)}%")
+
+    secondary_quality_cols = st.columns(3)
+    secondary_quality_cols[0].metric("Diagnostic Rate", f"{stats.get('diagnostic_rate', 0.0)}%")
+    secondary_quality_cols[1].metric("Avg Valid Score", stats.get("avg_valid_score", 0.0))
+    secondary_quality_cols[2].metric("Ready Runs", stats.get("ready_runs", 0))
+
+    if stats.get("benchmark_runs", 0):
+        st.caption(
+            f"Benchmark-only runs are averaging {stats.get('avg_benchmark_score', 0.0)}/10 "
+            "across the currently stored history."
+        )
+
+    summary_tab, strategy_tab, case_tab, recent_tab = st.tabs(
+        ["By Task Mode", "By Strategy", "By Case", "Recent Runs"]
+    )
+    with summary_tab:
+        if st.session_state.benchmark_by_task_mode:
+            for mode, info in st.session_state.benchmark_by_task_mode.items():
+                st.markdown(
+                    f"- **{mode}** · runs {info.get('count', 0)} · avg score {info.get('avg_score', 0.0)} · "
+                    f"avg cost ${info.get('avg_cost', 0.0):.4f} · avg iters {info.get('avg_iterations', 0.0)} · "
+                    f"verified {info.get('verified_rate', 0.0)}% · ready {info.get('ready_rate', 0.0)}%"
+                )
+        else:
+            st.caption("No task-mode benchmark data yet.")
+    with strategy_tab:
+        if st.session_state.benchmark_by_strategy:
+            strategy_labels = {
+                "arbiter_full_loop": "Arbiter Full Loop",
+                "baseline_single_pass": "Baseline Single Pass",
+                "manual_compare": "Manual Compare",
+                "unlabeled": "Unlabeled",
+            }
+            for strategy, info in st.session_state.benchmark_by_strategy.items():
+                label = strategy_labels.get(strategy, strategy.replace("_", " ").title())
+                st.markdown(
+                    f"- **{label}** · runs {info.get('count', 0)} · avg score {info.get('avg_score', 0.0)} · "
+                    f"avg cost ${info.get('avg_cost', 0.0):.4f} · avg iters {info.get('avg_iterations', 0.0)} · "
+                    f"valid {info.get('valid_rate', 0.0)}% · verified {info.get('verified_rate', 0.0)}% · "
+                    f"ready {info.get('ready_rate', 0.0)}%"
+                )
+        else:
+            st.caption("No strategy-labeled benchmark runs yet.")
+    with case_tab:
+        if st.session_state.benchmark_by_case:
+            ranked_cases = sorted(
+                st.session_state.benchmark_by_case.items(),
+                key=lambda item: item[1].get("count", 0),
+                reverse=True,
+            )
+            for case_id, info in ranked_cases[:8]:
+                st.markdown(
+                    f"- **{info.get('title', case_id)}** · {info.get('pack', 'General')} · "
+                    f"runs {info.get('count', 0)} · avg score {info.get('avg_score', 0.0)} · "
+                    f"avg cost ${info.get('avg_cost', 0.0):.4f}"
+                )
+        else:
+            st.caption("No benchmark-case history yet.")
+    with recent_tab:
+        if st.session_state.recent_benchmarks:
+            for run in reversed(st.session_state.recent_benchmarks[-6:]):
+                st.markdown(
+                    f"- `{run.get('run_id', 'n/a')}` · {run.get('task_mode', 'Unknown')} · "
+                    f"score {run.get('best_score', 0.0)} · cost ${run.get('total_cost', 0.0):.4f} · "
+                    f"{run.get('validity_status', 'UNKNOWN')} · {run.get('benchmark_strategy', 'unlabeled')}"
+                )
+        else:
+            st.caption("No recent benchmark runs yet.")
+
+
+def render_memory_governance():
+    memory_store = get_memory_store()
+    lifecycle_filter = st.selectbox(
+        "Memory Lifecycle Filter",
+        ["all", "active", "caution", "conflicted", "obsolete"],
+        index=0,
+        key="memory_governance_filter",
+    )
+
+    entries = memory_store.recent_entries(limit=20, include_obsolete=True) if hasattr(memory_store, "recent_entries") else []
+    notes = memory_store.project_notes() if hasattr(memory_store, "project_notes") else []
+
+    entry_tab, note_tab = st.tabs(["Memory Entries", "Project Notes"])
+
+    with entry_tab:
+        filtered_entries = [
+            entry for entry in entries
+            if lifecycle_filter == "all" or entry.get("memory_lifecycle") == lifecycle_filter
+        ]
+        if not filtered_entries:
+            st.caption("No memory entries match this filter yet.")
+        for entry in filtered_entries:
+            title = (
+                f"{entry.get('memory_lifecycle', 'caution').upper()} · "
+                f"{entry.get('task_mode', 'Unknown')} · "
+                f"{float(entry.get('avg_score', 0.0) or 0.0):.1f}/10"
+            )
+            with st.expander(title, expanded=False):
+                st.caption(
+                    f"{entry.get('memory_id', 'n/a')} · {entry.get('timestamp_utc', '')} · "
+                    f"{entry.get('validity_status', 'UNKNOWN')} · {entry.get('score_status', 'final')}"
+                )
+                st.write(entry.get("task_text", ""))
+                if entry.get("memory_reasons"):
+                    st.markdown("**Trust Notes**")
+                    for reason in entry.get("memory_reasons", []):
+                        st.markdown(f"- {reason}")
+                cols = st.columns(4)
+                for label, lifecycle in zip(
+                    cols,
+                    ["active", "caution", "conflicted", "obsolete"],
+                ):
+                    if label.button(
+                        lifecycle.title(),
+                        key=f"mem_lifecycle_{entry.get('memory_id')}_{lifecycle}",
+                    ):
+                        if hasattr(memory_store, "set_memory_lifecycle"):
+                            memory_store.set_memory_lifecycle(entry.get("memory_id", ""), lifecycle)
+                            st.session_state.memory_stats = memory_store.stats()
+                            st.rerun()
+
+    with note_tab:
+        if not notes:
+            st.caption("No project notes stored yet.")
+        for note in reversed(notes[-20:]):
+            state_label = "ACTIVE" if note.get("active", True) else "INACTIVE"
+            with st.expander(f"{state_label} · {note.get('task_mode', 'General')}", expanded=False):
+                st.caption(f"{note.get('note_id', 'n/a')} · {note.get('timestamp_utc', '')}")
+                st.write(note.get("text", ""))
+                toggle_label = "Deactivate" if note.get("active", True) else "Reactivate"
+                if st.button(toggle_label, key=f"note_toggle_{note.get('note_id')}"):
+                    if hasattr(memory_store, "set_project_note_active"):
+                        memory_store.set_project_note_active(note.get("note_id", ""), not note.get("active", True))
+                        st.session_state.memory_stats = memory_store.stats()
+                        st.rerun()
+
+
+def render_benchmark_lab():
+    st.markdown("#### Evaluation Lab")
+    packs = get_benchmark_packs()
+    if st.session_state.benchmark_pack not in packs:
+        st.session_state.benchmark_pack = packs[0]
+    selected_pack = st.selectbox(
+        "Scenario Pack",
+        packs,
+        index=packs.index(st.session_state.benchmark_pack),
+        help="Use named evaluation scenarios to compare Arbiter on repeatable tasks.",
+    )
+    st.session_state.benchmark_pack = selected_pack
+
+    cases = get_benchmark_cases(pack=selected_pack)
+    case_labels = [f"{case['title']} · {case['task_mode']}" for case in cases]
+    case_index = 0
+    if st.session_state.benchmark_case_id:
+        for idx, case in enumerate(cases):
+            if case["id"] == st.session_state.benchmark_case_id:
+                case_index = idx
+                break
+    selected_label = st.selectbox("Scenario", case_labels, index=case_index)
+    selected_case = cases[case_labels.index(selected_label)]
+    st.session_state.benchmark_case_id = selected_case["id"]
+
+    st.session_state.benchmark_strategy = st.radio(
+        "Run Strategy",
+        [
+            "arbiter_full_loop",
+            "baseline_single_pass",
+        ],
+        index=0 if st.session_state.benchmark_strategy != "baseline_single_pass" else 1,
+        format_func=lambda item: {
+            "arbiter_full_loop": "Arbiter Full Loop",
+            "baseline_single_pass": "Baseline Single Pass",
+        }.get(item, item),
+        help="Baseline Single Pass keeps the run to one direct pass so you can compare it against the full Arbiter loop.",
+    )
+
+    meta = st.columns(3)
+    meta[0].metric("Pack", selected_case["pack"])
+    meta[1].metric("Mode", selected_case["task_mode"])
+    meta[2].metric(
+        "Strategy",
+        "Full Loop" if st.session_state.benchmark_strategy == "arbiter_full_loop" else "Single Pass",
+    )
+
+    st.markdown(
+        f"""
+        <div class="lab-card">
+            <div class="lab-card-label">Scenario Goal</div>
+            <div class="lab-card-text">{html.escape(selected_case["goal"])}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("**Masked Scenario Preview**")
+    st.code(mask_text(selected_case["prompt"]), language="text")
+
+    with st.expander("Reveal Full Scenario", expanded=False):
+        st.code(selected_case["prompt"], language="text")
+
+    cols = st.columns(2)
+    if cols[0].button("Load Scenario Into Task", key="load_benchmark_case"):
+        st.session_state.task_mode = selected_case["task_mode"]
+        st.session_state.task_draft = selected_case["prompt"]
+        st.session_state.current_task = selected_case["prompt"]
+        st.session_state.step = "input"
+        st.success("Scenario loaded into the task editor.")
+        st.rerun()
+    if cols[1].button("Tag Current Task For Evaluation", key="tag_benchmark_case"):
+        st.session_state.benchmark_mode = True
+        st.session_state.current_task = st.session_state.current_task or st.session_state.task_draft
+        st.success("Current task tagged for evaluation tracking.")
+
+
+def render_advanced_hub():
+    st.markdown("### Operator Console")
+    st.caption("Internal evaluation, diagnostics, and memory governance live here.")
+    tabs = st.tabs(["Evaluation Lab", "Metrics", "System Trace", "Run Memory", "Memory Governance"])
+    with tabs[0]:
+        render_benchmark_lab()
+    with tabs[1]:
+        render_benchmark_panel()
+    with tabs[2]:
+        render_health_and_decisions()
+    with tabs[3]:
+        render_memory_panel()
+    with tabs[4]:
+        render_memory_governance()
 
 
 def render_telemetry_panel():
@@ -460,43 +1301,32 @@ def render_telemetry_panel():
     best = st.session_state.best_iteration
     weights = TASK_PROFILES[st.session_state.task_mode].get("score_weights", {"tech": 0.5, "logic": 0.5})
     current_label = "Diagnostic Avg" if latest.get("score_status") == "diagnostic" else "Current Avg"
-    current_meta_prefix = "Diagnostic only" if latest.get("score_status") == "diagnostic" else "Tech"
+    current_meta_prefix = "Diagnostic only" if latest.get("score_status") == "diagnostic" else "Current review"
     if best:
-        best_value = f"CYCLE {best['iter']}"
-        best_meta = f"Tech {best['tech']}/10 · Logic {best['logic']}/10 · Weighted Avg {best['avg']:.1f}"
+        best_value = f"Round {best['iter']}"
+        best_meta = f"Technical {best['tech']}/10 · Logic {best['logic']}/10 · Weighted average {best['avg']:.1f}"
     else:
-        best_value = "NO VALID ROUND"
+        best_value = "No valid round"
         best_meta = "Only diagnostic or blocked runs so far"
+    render_summary_cards(
+        [
+            ("Task Mode", st.session_state.task_mode),
+            (current_label, f"{latest['avg']:.1f}/10"),
+            ("Best Round", best_value),
+            ("Adaptive State", "Stable" if st.session_state.stable_mode else ("Rewrite" if st.session_state.rewrite_mode else "Refine")),
+            ("Memory", f"{st.session_state.memory_stats.get('count', 0)} entries"),
+        ]
+    )
 
-    st.markdown(f"""
-    <div class="telemetry-grid">
-        <div class="telemetry-card">
-            <div class="telemetry-label">TASK MODE</div>
-            <div class="telemetry-value">{html.escape(st.session_state.task_mode.upper())}</div>
-            <div class="telemetry-meta">{html.escape(TASK_PROFILES[st.session_state.task_mode]['tag'])}</div>
-        </div>
-        <div class="telemetry-card">
-            <div class="telemetry-label">{current_label.upper()}</div>
-            <div class="telemetry-value">{latest['avg']:.1f}/10</div>
-            <div class="telemetry-meta">{current_meta_prefix} {latest['tech']}/10 · Logic {latest['logic']}/10 · Weights T {weights['tech']:.2f} / L {weights['logic']:.2f}</div>
-        </div>
-        <div class="telemetry-card">
-            <div class="telemetry-label">BEST ROUND</div>
-            <div class="telemetry-value">{best_value}</div>
-            <div class="telemetry-meta">{best_meta}</div>
-        </div>
-        <div class="telemetry-card">
-            <div class="telemetry-label">ADAPTIVE STATE</div>
-            <div class="telemetry-value">{'STABLE' if st.session_state.stable_mode else ('REWRITE' if st.session_state.rewrite_mode else 'REFINE')}</div>
-            <div class="telemetry-meta">Provider {html.escape(st.session_state.provider_lock.upper())} · Preflight {st.session_state.preflight_events} · Repairs {st.session_state.repair_events}</div>
-        </div>
-        <div class="telemetry-card">
-            <div class="telemetry-label">MEMORY</div>
-            <div class="telemetry-value">{st.session_state.memory_stats.get('count', 0)} ENTRIES</div>
-            <div class="telemetry-meta">Backend: {str(st.session_state.memory_stats.get('backend', 'native')).upper()} · Run {html.escape(st.session_state.run_id or 'n/a')}</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.caption(
+        f"{TASK_PROFILES[st.session_state.task_mode]['tag']} · "
+        f"{current_meta_prefix} · Technical {latest['tech']}/10 · Logic {latest['logic']}/10 · "
+        f"Technical weight {weights['tech']:.2f} / Logic weight {weights['logic']:.2f}"
+    )
+    st.caption(
+        f"{best_meta} · Provider {st.session_state.provider_lock.upper()} · "
+        f"Preflight {st.session_state.preflight_events} · Repairs {st.session_state.repair_events}"
+    )
 
 
 def render_memory_panel():
@@ -576,6 +1406,10 @@ def render_review_panel():
     memory_status = latest.get("memory_status", "ACCEPT")
     memory_consensus = float(latest.get("memory_consensus_score", 0.0) or 0.0)
     memory_reasons = latest.get("memory_reasons", []) or []
+    verification_status = str(latest.get("verification_status", "UNVERIFIED")).upper()
+    verification_score = float(latest.get("verification_score", 0.0) or 0.0)
+    verification_summary = str(latest.get("verification_summary", "") or "").strip()
+    ship_readiness = str(latest.get("ship_readiness", "UNASSESSED")).upper()
     tech_confirmed = latest.get("tech_confirmed_defects", []) or []
     tech_risks = latest.get("tech_risks", []) or []
     tech_improvements = latest.get("tech_improvements", []) or []
@@ -602,14 +1436,21 @@ def render_review_panel():
             st.caption(empty_text)
 
     with st.container(border=True):
-        st.subheader("Review Summary")
-        metric_cols = st.columns(5)
-        metric_cols[0].metric("Status", validity_status)
-        metric_cols[1].metric("Tech", f"{latest['tech']}/10")
-        metric_cols[2].metric("Logic", f"{latest['logic']}/10")
-        metric_cols[3].metric("Average", f"{latest['avg']:.1f}/10")
-        metric_cols[4].metric("Confidence", review_confidence.upper())
+        st.subheader("The Arbiter Order")
+        render_summary_cards(
+            [
+                ("Status", validity_status),
+                ("Technical Score", f"{latest['tech']}/10"),
+                ("Logic Score", f"{latest['logic']}/10"),
+                ("Weighted Average", f"{latest['avg']:.1f}/10"),
+                ("Confidence", review_confidence.upper()),
+                ("Verification", verification_status),
+                ("Readiness", ship_readiness),
+            ]
+        )
         st.caption(f"Score type: {score_status.upper()} · {status_note}")
+        if verification_summary:
+            st.info(f"Verification {verification_score:.2f} · {verification_summary}")
 
         if latest.get("preflight_issues"):
             st.error("Preflight Findings")
@@ -628,16 +1469,20 @@ def render_review_panel():
         if redundancy:
             st.warning(
                 f"Critic redundancy detected. Tech and Logic feedback overlapped heavily ({overlap:.0%} token overlap). "
-                "Arbiter reran the Logic Critic with a narrower brief and lowered review confidence."
+                "The Arbiter reran the Logic Critic with a narrower brief and lowered review confidence."
             )
 
         with st.container(border=True):
-            st.markdown("**Memory Consensus**")
-            st.write(f"Status: {memory_status}")
-            st.write(f"Consensus Score: {memory_consensus:.2f}")
-            render_list(memory_reasons, empty_text="No memory notes.")
+            render_summary_cards(
+                [
+                    ("Learning Status", memory_status),
+                    ("Consensus", f"{memory_consensus:.2f}"),
+                    ("Retry Source", "Janitor"),
+                    ("Verifier Score", f"{verification_score:.2f}"),
+                ]
+            )
 
-        st.markdown("### Janitor Verdict")
+        st.markdown("### Janitor Resolution")
         st.markdown("**Summary**")
         st.write(janitor["summary"] or "None")
         st.markdown("**Primary Subsystem**")
@@ -670,36 +1515,56 @@ def render_review_panel():
                 st.session_state.step = "negotiation"
                 st.rerun()
 
-    with st.expander("Tech Critic Details"):
-        st.markdown(f"**Technical Audit:** {latest.get('tech_critique', 'No issues.')}")
-        st.markdown("**Confirmed Defects**")
-        render_list(tech_confirmed)
-        st.markdown("**Risks / Assumptions**")
-        render_list(tech_risks)
-        st.markdown("**Improvements**")
-        render_list(tech_improvements)
-        if latest.get("tech_repair_contract"):
-            st.markdown("**Tech Repair Contract**")
-            render_list(latest.get("tech_repair_contract", []))
+    with st.expander("Counsel Positions", expanded=False):
+        counsel_left, counsel_right = st.columns(2)
+        with counsel_left:
+            with st.container(border=True):
+                st.markdown("**Technical Counsel**")
+                st.caption(normalize_visible_message(latest.get('tech_critique', 'No issues.')))
+                render_summary_cards([("Confirmed Defects", len(tech_confirmed))])
+                if tech_confirmed:
+                    render_list(tech_confirmed[:3])
+        with counsel_right:
+            with st.container(border=True):
+                st.markdown("**Logic Counsel**")
+                st.caption(normalize_visible_message(latest.get('logic_critique', 'No issues.')))
+                render_summary_cards([("Confirmed Defects", len(logic_confirmed))])
+                if logic_confirmed:
+                    render_list(logic_confirmed[:3])
 
-    with st.expander("Logic Critic Details"):
-        st.markdown(f"**Logic Audit:** {latest.get('logic_critique', 'No issues.')}")
-        st.markdown("**Confirmed Defects**")
+    with st.expander("Review Transcript", expanded=False):
+        st.markdown("**Technical Counsel**")
+        st.markdown("Confirmed Defects")
+        render_list(tech_confirmed)
+        st.markdown("Risks / Assumptions")
+        render_list(tech_risks)
+        if latest.get("tech_repair_contract"):
+            st.markdown("Technical Repair Contract")
+            render_list(latest.get("tech_repair_contract", []))
+        if tech_improvements:
+            st.markdown("Technical Improvements")
+            render_list(tech_improvements)
+
+        st.markdown("---")
+        st.markdown("**Logic Counsel**")
+        st.markdown("Confirmed Defects")
         render_list(logic_confirmed)
-        st.markdown("**Risks / Assumptions**")
+        st.markdown("Risks / Assumptions")
         render_list(logic_risks)
-        st.markdown("**Improvements**")
-        render_list(logic_improvements)
         if latest.get("logic_repair_contract"):
-            st.markdown("**Logic Repair Contract**")
+            st.markdown("Logic Repair Contract")
             render_list(latest.get("logic_repair_contract", []))
+        if logic_improvements:
+            st.markdown("Logic Improvements")
+            render_list(logic_improvements)
 
 
 # ── Sidebar ──────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("<h1 style='color:#00ffa3;font-size:1.6rem;'>🛡️ ARBITER CORE</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='color:#ffffff;font-size:1.45rem;margin-bottom:0;'>The Arbiter</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#b6c4d6;font-size:0.78rem;margin-top:4px;'>Deliberation workspace</p>", unsafe_allow_html=True)
 
-    st.markdown("### 📊 RESOURCE DRAIN")
+    st.markdown("### Cost Overview")
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"<p class='cost-label'>ARCHITECT</p><p class='cost-value'>${st.session_state.costs['Architect']:.4f}</p>", unsafe_allow_html=True)
@@ -714,27 +1579,15 @@ with st.sidebar:
         st.markdown(f"<p class='cost-label'>CRITICS</p><p class='cost-value'>${critic_total:.4f}</p>", unsafe_allow_html=True)
         st.markdown(f"<p class='cost-label'>TOTAL</p><p class='cost-value' style='color:#fff;font-size:1.1rem;'>${st.session_state.costs['Total']:.4f}</p>", unsafe_allow_html=True)
 
-    if st.session_state.model_usage:
-        latest_models = {}
-        for item in st.session_state.model_usage:
-            latest_models[item["role"]] = item["model"]
-        st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;margin-top:12px;'>ACTIVE MODELS</p>", unsafe_allow_html=True)
-        for role in ("Architect", "Architect Repair", "Auditor", "Tech Critic", "Logic Critic", "Critic Debate", "Janitor"):
-            if role in latest_models:
-                st.markdown(
-                    f"<p class='cost-label'>{role.upper()}</p><p class='cost-value' style='font-size:0.75rem;'>{latest_models[role]}</p>",
-                    unsafe_allow_html=True,
-                )
-
     st.divider()
 
-    st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;'>MISSION PROFILE</p>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size:0.7rem;color:#b6c4d6;letter-spacing:2px;'>WORKFLOW</p>", unsafe_allow_html=True)
     st.session_state.task_mode = st.selectbox(
         "Task Mode",
         list(TASK_PROFILES.keys()),
         index=list(TASK_PROFILES.keys()).index(st.session_state.task_mode),
     )
-    st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;'>AI STRATEGY</p>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size:0.7rem;color:#b6c4d6;letter-spacing:2px;'>AI STRATEGY</p>", unsafe_allow_html=True)
     preset_names = list(MODEL_PRESETS.keys())
     preset_name = st.selectbox(
         "AI Preset",
@@ -783,7 +1636,7 @@ with st.sidebar:
     }
     role_models = {}
     if st.session_state.manual_model_selection:
-        st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;margin-top:12px;'>MODEL SELECTION</p>", unsafe_allow_html=True)
+        st.markdown("<p style='font-size:0.7rem;color:#b6c4d6;letter-spacing:2px;margin-top:12px;'>MODEL SELECTION</p>", unsafe_allow_html=True)
         for role in role_order:
             options = get_available_models_for_role(role)
             current_value = st.session_state.selected_models.get(role, options[0] if options else "")
@@ -812,77 +1665,80 @@ with st.sidebar:
     if any(provider_for_model(model, "") == "anthropic" for model in role_models.values()) and not os.getenv("ANTHROPIC_API_KEY"):
         st.warning("Claude/Anthropic models are selected, but `ANTHROPIC_API_KEY` is not set in your `.env` yet.")
 
-    st.markdown("""
-    <div style='background:rgba(255,170,0,0.05);border:1px solid rgba(255,170,0,0.2);
-    border-radius:6px;padding:10px;margin-top:8px;font-size:0.65rem;color:#888;line-height:1.8;'>
-    💡 <b style='color:#ffaa00;'>Preset tip:</b><br>
-    Start with a named preset if you are not sure which AIs to use.<br>
-    Turn on manual customization only when you want to control each role yourself.
-    </div>
-    """, unsafe_allow_html=True)
+    st.info("Start with a preset. Only open manual model control when you need role-level tuning.")
 
     st.divider()
 
-    if st.session_state.iteration_history:
-        st.markdown("<p style='font-size:0.7rem;color:#555;letter-spacing:2px;'>ITERATION LOG</p>", unsafe_allow_html=True)
-        for h in st.session_state.iteration_history:
-            score_color = "#00ffa3" if h["avg"] >= 7 else ("#ffaa00" if h["avg"] >= 5 else "#ff4466")
-            st.markdown(f"""
-            <div class='iter-bar'>
-                Cycle {h['iter']} &nbsp;·&nbsp;
-                <span style='color:{score_color};font-weight:700;'>
-                    T:{h['tech']} L:{h['logic']} AVG:{h['avg']:.1f}
-                </span>
-            </div>
-            """, unsafe_allow_html=True)
-        st.divider()
-
+    st.markdown("<p style='font-size:0.7rem;color:#b6c4d6;letter-spacing:2px;'>DANGER ZONE</p>", unsafe_allow_html=True)
     if st.button("🔴 EMERGENCY PURGE"):
         st.session_state.clear()
         st.rerun()
 
     st.markdown("""
     <div class="luca-branding">
-        <div class="luca-name">Empowered by Luca Crăciun</div>
+        <div class="luca-name">Built by Luca Crăciun</div>
         <div style='margin-top:12px;'>
-            <a href="https://github.com/lucaomul" class="luca-link">GITHUB</a>
-            <a href="https://www.linkedin.com/in/gabriel-luca-craciun-25ba95295" class="luca-link">LINKEDIN</a>
+            <a href="https://github.com/lucaomul" class="luca-link">GitHub</a>
+            <a href="https://www.linkedin.com/in/gabriel-luca-craciun-25ba95295" class="luca-link">LinkedIn</a>
         </div>
-        <div style='font-size:0.6rem;color:#444;margin-top:10px;letter-spacing:2px;'>ALPHA-SYSTEM v7.0</div>
+        <div style='font-size:0.68rem;color:#9fb0c5;margin-top:10px;'>The Arbiter product build</div>
     </div>
     """, unsafe_allow_html=True)
 
 
 # ── Main header ──────────────────────────────────────────────
-st.markdown(
-    "<h1 style='text-align:center;letter-spacing:12px;margin-bottom:40px;'>"
-    "THE <span style='color:#00ffa3;'>ARBITER</span></h1>",
-    unsafe_allow_html=True,
-)
+render_product_header()
 render_telemetry_panel()
+render_case_flow_panel()
+render_deliberation_scene()
 
-# ── Chat history ─────────────────────────────────────────────
-for msg in st.session_state.messages:
-    render_message(msg["role"], msg["content"])
-
-render_review_panel()
-render_memory_panel()
-
+if st.session_state.iteration_history:
+    left_col, right_col = st.columns([1.12, 0.88])
+    with left_col:
+        render_architect_surface()
+    with right_col:
+        render_review_panel()
+        render_intelligence_signals()
+elif st.session_state.step in {"input", "audit", "clarification"}:
+    render_auditor_surface()
 
 # ════════════════════════════════════════════════
 # STEP 1: Input
 # ════════════════════════════════════════════════
 if st.session_state.step == "input":
     with st.form("arbiter_input_form", clear_on_submit=False):
+        st.session_state.auto_mode_enabled = st.checkbox(
+            "Autonomous mode",
+            value=st.session_state.auto_mode_enabled,
+            help="Let The Arbiter run multiple rounds toward a target score instead of a single pass.",
+        )
+        if st.session_state.auto_mode_enabled:
+            run_cols = st.columns(2)
+            with run_cols[0]:
+                st.session_state.target_score_setting = st.slider(
+                    "Minimum acceptable score",
+                    6,
+                    10,
+                    int(st.session_state.target_score_setting),
+                )
+            with run_cols[1]:
+                st.session_state.max_iterations_setting = st.number_input(
+                    "Max iterations",
+                    min_value=1,
+                    max_value=8,
+                    value=int(st.session_state.max_iterations_setting),
+                )
         u_input = st.text_area(
             "OVERRIDE COMMAND:",
+            value=st.session_state.task_draft,
             placeholder="Describe your technical task in detail...",
             height=150,
         )
-        submitted = st.form_submit_button("⚡ INITIALIZE COGNITIVE LOOP")
-    st.caption("Arbiter will either ask for missing context or confirm that the task is clear enough to proceed.")
+        submitted = st.form_submit_button("INITIALIZE COGNITIVE LOOP")
+    st.caption("The Arbiter will either ask for missing context or confirm that the task is clear enough to proceed.")
     if submitted and u_input:
         reset_run_state(keep_task_mode=True)
+        st.session_state.task_draft = u_input
         st.session_state.current_task = u_input
         st.session_state.step = "audit"
         st.rerun()
@@ -921,6 +1777,8 @@ elif st.session_state.step == "audit":
         st.session_state.pending_questions = []
         st.session_state.audit_status = "passed"
         st.session_state.step = "negotiation"
+        st.session_state.pending_auto_run = True
+        st.session_state.run_in_progress = True
         st.rerun()
 
 
@@ -928,17 +1786,14 @@ elif st.session_state.step == "audit":
 # STEP 3: Clarification
 # ════════════════════════════════════════════════
 elif st.session_state.step == "clarification":
-    if st.session_state.pending_questions:
-        st.info("Auditor needs a bit more context before the build starts.")
-        for question in st.session_state.pending_questions:
-            st.markdown(f"- {question}")
+    st.caption("Respond to the Auditor below so the case can proceed.")
     with st.form("arbiter_clarification_form", clear_on_submit=False):
         ans = st.text_area("PROVIDE ADDITIONAL DATA:", height=120)
         clarify_submitted = st.form_submit_button("RE-SYNCHRONIZE")
     if clarify_submitted:
         if ans.strip():
             st.session_state.current_task += f" | Additional context: {ans.strip()}"
-        st.session_state.step = "negotiation"
+        st.session_state.step = "audit"
         st.rerun()
 
 
@@ -946,11 +1801,14 @@ elif st.session_state.step == "clarification":
 # STEP 4: Negotiation (main debate loop)
 # ════════════════════════════════════════════════
 elif st.session_state.step == "negotiation":
-    if st.session_state.audit_status == "passed":
-        st.success("Auditor check passed. The task is specific enough to proceed.")
+    round_number = max(int(st.session_state.iteration or 0) + 1, 1)
     st.markdown(
-        f"<p style='opacity:0.3;font-size:0.75rem;letter-spacing:1px;'>"
-        f"CYCLE_INDEX: {st.session_state.iteration}</p>",
+        (
+            "<div class='status-strip'>"
+            "<span class='status-strip-label'>Deliberation Round</span>"
+            f"<span class='status-strip-value'>{round_number}</span>"
+            "</div>"
+        ),
         unsafe_allow_html=True,
     )
 
@@ -958,14 +1816,12 @@ elif st.session_state.step == "negotiation":
     with col_input:
         janitor_context = build_retry_context()
         if janitor_context:
-            with st.expander("Janitor Retry Context", expanded=True):
+            with st.expander("Janitor Retry Context", expanded=False):
                 st.caption("This is the default rerun brief. Arbiter will use it automatically on the next run.")
-                st.text_area(
-                    "Janitor Context",
-                    value=janitor_context,
-                    height=220,
-                    disabled=True,
-                    label_visibility="collapsed",
+                retry_html = html.escape(janitor_context)
+                st.markdown(
+                    f"<div class='retry-brief-block'><pre>{retry_html}</pre></div>",
+                    unsafe_allow_html=True,
                 )
 
         st.session_state.manual_feedback_enabled = st.checkbox(
@@ -1022,34 +1878,47 @@ elif st.session_state.step == "negotiation":
                 elif note_text:
                     st.warning("Project notes need one full app restart before saving is available.")
     with col_opt:
-        auto_mode      = st.checkbox("AUTONOMOUS MODE", value=False)
-        target_score   = st.slider("Target score",   6, 10, 8) if auto_mode else 8.0
-        max_iterations = st.number_input("Max iterations", 1, 8, 5) if auto_mode else 1
+        with st.container(border=True):
+            st.markdown("**Run Profile**")
+            st.caption("Autonomous settings are chosen before the Auditor intake.")
+            render_summary_cards(
+                [
+                    ("Mode", "Autonomous" if st.session_state.auto_mode_enabled else "Single Pass"),
+                    ("Minimum Score", str(st.session_state.target_score_setting if st.session_state.auto_mode_enabled else 8)),
+                    ("Max Iterations", str(st.session_state.max_iterations_setting if st.session_state.auto_mode_enabled else 1)),
+                    ("Provider", st.session_state.provider_lock.upper()),
+                ]
+            )
+        st.session_state.benchmark_mode = False
 
-    if st.button("🚀 EXECUTE COGNITIVE DEBATE"):
+    effective_auto_mode = bool(st.session_state.auto_mode_enabled)
+    effective_target_score = float(st.session_state.target_score_setting if st.session_state.auto_mode_enabled else 8.0)
+    effective_max_iterations = int(st.session_state.max_iterations_setting if st.session_state.auto_mode_enabled else 1)
+    if st.session_state.benchmark_mode and st.session_state.benchmark_strategy == "baseline_single_pass":
+        effective_auto_mode = False
+        effective_target_score = 8.0
+        effective_max_iterations = 1
+
+    if st.session_state.pending_auto_run:
+        st.session_state.pending_auto_run = False
         get_cache().clear()
         manual_override = build_effective_manual_override()
-        with st.spinner("Running intelligence pipeline..."):
-            orchestrator = ArbiterOrchestrator(
-                task_mode=st.session_state.task_mode,
-                auto_mode=auto_mode,
-                target_score=float(target_score),
-                max_iterations=int(max_iterations),
-                stable_mode=st.session_state.stable_mode,
-            )
-            result = orchestrator.run(
-                user_input=st.session_state.current_task,
-                clarification="already_audited",   # skip re-audit
-                manual_override=manual_override,
-            )
+        execute_deliberation_run(
+            auto_mode=effective_auto_mode,
+            target_score=effective_target_score,
+            max_iterations=effective_max_iterations,
+            manual_override=manual_override,
+        )
+        st.rerun()
 
-        sync_state_from_result(result)
-        st.session_state.retry_override = ""
+    if st.button("EXECUTE COGNITIVE DEBATE"):
+        st.session_state.pending_auto_run = True
+        st.session_state.run_in_progress = True
         st.rerun()
 
     if st.session_state.iteration > 0:
         st.divider()
-        if st.button("📥 GENERATE FINAL REPORT"):
+        if st.button("GENERATE FINAL REPORT"):
             st.session_state.step = "export"
             st.rerun()
 
@@ -1061,7 +1930,7 @@ elif st.session_state.step == "export":
     st.balloons()
     st.markdown("""
     <div class='agent-card' style='text-align:center;'>
-        <h2 style='color:#00ffa3;'>MISSION COMPLETE</h2>
+        <h2 style='color:#111111;'>MISSION COMPLETE</h2>
         <p style='opacity:0.7;'>The optimized solution is compiled and ready for deployment.</p>
     </div>
     """, unsafe_allow_html=True)
@@ -1096,12 +1965,12 @@ elif st.session_state.step == "export":
             pdf_output = bytes(pdf_output)
 
         st.download_button(
-            label="📥 DOWNLOAD REPORT (PDF)",
+            label="DOWNLOAD REPORT (PDF)",
             data=pdf_output,
-            file_name="Arbiter_Report.pdf",
+            file_name="The_Arbiter_Report.pdf",
             mime="application/pdf",
         )
 
-    if st.button("🏁 RESTART SYSTEM"):
+    if st.button("RESTART SYSTEM"):
         st.session_state.clear()
         st.rerun()

@@ -188,6 +188,9 @@ class ModelSelector:
         candidates = self._registry.candidates_for_role(agent)
         if self._provider_lock:
             candidates = [plugin for plugin in candidates if plugin.provider == self._provider_lock]
+        manual_override_model = self._overrides.get(agent, "")
+        if manual_override_model and current_model == manual_override_model:
+            return []
         current_provider = provider_for_model(current_model, "")
         current_family = current_model.split(":", 1)[0] if ":" in current_model else current_model.split("-", 1)[0]
 

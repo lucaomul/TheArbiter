@@ -260,6 +260,37 @@ class MemoryStore:
     def project_notes(self) -> List[Dict]:
         return list(self._project_notes[-50:])
 
+    def recent_entries(self, limit: int = 25, include_obsolete: bool = True) -> List[Dict]:
+        entries = list(self._entries[-limit:])
+        if not include_obsolete:
+            entries = [entry for entry in entries if entry.get("memory_lifecycle") != "obsolete"]
+        return list(reversed(entries))
+
+    def set_memory_lifecycle(self, memory_id: str, lifecycle: str) -> bool:
+        lifecycle = str(lifecycle or "").strip().lower()
+        if lifecycle not in self.LIFECYCLE_PRIORITY:
+            return False
+        updated = False
+        for entry in self._entries:
+            if entry.get("memory_id") == memory_id:
+                entry["memory_lifecycle"] = lifecycle
+                updated = True
+                break
+        if updated:
+            self._persist_entries()
+        return updated
+
+    def set_project_note_active(self, note_id: str, active: bool) -> bool:
+        updated = False
+        for note in self._project_notes:
+            if note.get("note_id") == note_id:
+                note["active"] = bool(active)
+                updated = True
+                break
+        if updated:
+            self._persist_project_notes()
+        return updated
+
     @staticmethod
     def _memory_lifecycle(memory_status: str, validity_status: str, score_status: str) -> str:
         if memory_status == "REJECT":
@@ -332,6 +363,7 @@ class MemoryStore:
         logic_issues: list,
         validity_status: str,
         score_status: str,
+        verification_status: str = "UNVERIFIED",
         limit: int = 3,
     ) -> Dict:
         related = self.retrieve_relevant(task_mode, task_text, unresolved_issues={
@@ -387,6 +419,10 @@ class MemoryStore:
             status = "ACCEPT_WITH_CAUTION"
             reasons.append("Preflight issues were present in this run.")
 
+        if verification_status in {"FAILED", "BLOCKED"} and validity_status == "VALID":
+            status = "ACCEPT_WITH_CAUTION"
+            reasons.append("Deterministic verification did not fully clear this result.")
+
         if conflict_reasons and validity_status == "VALID":
             status = "CONFLICT"
             reasons.extend(conflict_reasons[:2])
@@ -422,6 +458,10 @@ class MemoryStore:
         validity_status: str = "VALID",
         score_status: str = "final",
         review_confidence: str = "normal",
+        verification_status: str = "UNVERIFIED",
+        verification_score: float = 0.0,
+        verification_summary: str = "",
+        ship_readiness: str = "UNASSESSED",
         run_id: str = "",
         source_trace: Optional[Dict] = None,
     ):
@@ -434,6 +474,7 @@ class MemoryStore:
             logic_issues=logic_issues,
             validity_status=validity_status,
             score_status=score_status,
+            verification_status=verification_status,
         )
 
         task_tokens = self._tokenize(task_text)
@@ -451,6 +492,10 @@ class MemoryStore:
             "validity_status": validity_status,
             "score_status": score_status,
             "review_confidence": review_confidence,
+            "verification_status": verification_status,
+            "verification_score": float(verification_score or 0.0),
+            "verification_summary": str(verification_summary or "")[:320],
+            "ship_readiness": str(ship_readiness or "UNASSESSED"),
             "preflight_issues": list(preflight_issues or [])[:6],
             "tech_issues": list(tech_issues or [])[:6],
             "logic_issues": list(logic_issues or [])[:6],
@@ -469,6 +514,7 @@ class MemoryStore:
                 "tech_model": tech_model,
                 "logic_model": logic_model,
                 "iteration": iteration,
+                "verification_status": verification_status,
             },
             "supersedes": None,
             "superseded_by": None,
@@ -647,11 +693,13 @@ class MemoryStore:
         modes = Counter(entry.get("task_mode", "Unknown") for entry in self._entries)
         memory_status = Counter(entry.get("memory_status", "ACCEPT") for entry in self._entries)
         lifecycle = Counter(entry.get("memory_lifecycle", "caution") for entry in self._entries)
+        verification = Counter(entry.get("verification_status", "UNVERIFIED") for entry in self._entries)
         return {
             "count": len(self._entries),
             "task_modes": dict(modes),
             "memory_status": dict(memory_status),
             "memory_lifecycle": dict(lifecycle),
+            "verification_status": dict(verification),
             "project_notes_count": len([note for note in self._project_notes if note.get("active", True)]),
             "backend": self._backend,
             "path": str(MEMORY_DIR),

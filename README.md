@@ -1,195 +1,295 @@
 # The Arbiter
 
-**A multi-agent AI orchestration system for building, challenging, repairing, and improving outputs before they reach the user.**
+**The Arbiter is a multi-agent AI orchestration workspace that audits the brief, drafts the solution, challenges it with specialist critics, cleans the dispute into a repair brief, and improves the result through controlled retries, persistent memory, and verification-aware trust signals.**
 
-Arbiter is built on a simple idea:
+This project exists because one-shot prompting is not enough for serious work.
 
-> high-quality AI systems should not trust a single model’s first answer.
+If you care about:
+- better output quality
+- fewer hallucinated “wins”
+- clearer retry logic
+- tighter control over cost and provider behavior
+- reusable learning across repeated tasks
 
-Instead of relying on one LLM to generate and hope for the best, Arbiter runs a structured decision loop across specialized roles, deterministic validation, managed memory, and controlled retries.
+then you need more than a single model with a nice prompt.
 
-The result is a system that is more robust, more transparent, and more production-minded than a one-shot prompt wrapper.
+You need a system.
 
----
-
-## Why this exists
-
-Most AI applications still behave like this:
-- prompt one model
-- get one answer
-- hope it is correct
-
-That approach breaks down quickly for:
-- software generation
-- planning with constraints
-- operational workflows
-- high-ambiguity business tasks
-- anything where one hallucinated assumption can poison the whole result
-
-Arbiter addresses that by introducing:
-- **role separation**
-- **local validation before review spend**
-- **critic disagreement**
-- **Janitor-led repair synthesis**
-- **persistent learning across runs**
-- **explicit provider and model controls**
-
-This is the kind of architecture you build when you care about correctness, controllability, and iteration quality, not just demo output.
+The Arbiter is that system.
 
 ---
 
-## What Arbiter does
+## What The Arbiter Does
 
-Arbiter coordinates multiple AI roles inside a structured loop:
+The Arbiter coordinates a structured intelligence loop across multiple AI roles:
 
 - `Auditor`
-  checks whether the request is complete enough to build against
+  checks whether the brief is specific enough to build against
 
 - `Architect`
-  generates the primary solution
+  produces the main solution
 
 - `Tech Critic`
-  evaluates execution quality, implementation quality, technical correctness, and reliability
+  tests execution quality, technical correctness, implementation rigor, and operational feasibility
 
 - `Logic Critic`
-  evaluates requirement coverage, structure, reasoning, and completeness
+  tests reasoning quality, completeness, requirement coverage, and structural coherence
 
 - `Janitor`
-  consolidates all findings into a clean repair brief and becomes the default retry source
+  consolidates the dispute into a cleaner repair brief and becomes the default retry source
 
-Before critics even run, Arbiter also applies:
+Before and after that loop, The Arbiter also applies:
 
 - `Preflight validation`
-  deterministic local checks that catch hard structural issues early
+  fast deterministic checks that catch structural failures before spending on unnecessary review
 
-And across runs, it keeps:
+- `Deterministic verification`
+  grounded post-generation checks that calibrate confidence and make the score more truthful
 
 - `Persistent memory`
-  retrieval of similar failures, repair patterns, and trusted prior lessons
+  stored repair patterns, trusted history, and project notes that can be retrieved on similar future tasks
 
-This creates a system that is not just “multi-model,” but **multi-stage and self-correcting**.
+The result is a system that does not just generate answers.
+It **builds, challenges, repairs, and learns**.
 
 ---
 
-## Core capabilities
+## Why It Matters
 
-### 1. Multi-agent orchestration
-Arbiter separates generation, validation, criticism, and repair into distinct roles. This reduces the chance that one model silently grades its own work.
+Most AI products still behave like this:
 
-### 2. Preflight before critic spend
-For software and other structured tasks, Arbiter runs cheap deterministic checks before expensive critique rounds. Broken outputs can be blocked, repaired, or downgraded before wasting more API calls.
+1. send prompt
+2. get answer
+3. hope it is right
 
-### 3. Janitor-led retries
-Instead of feeding raw noisy critic text back into the Architect, Arbiter uses the Janitor to produce:
+That breaks fast when the task has:
+- real constraints
+- real ambiguity
+- multiple moving parts
+- implementation details
+- business consequences
+
+The Arbiter is designed to reduce that fragility.
+
+Instead of trusting a single first answer, it introduces:
+- role separation
+- explicit failure handling
+- Janitor-led retries
+- model and provider controls
+- verification-aware trust signals
+- memory-guided improvement
+
+This makes it much closer to an **AI reasoning and quality-control platform** than a prompt wrapper.
+
+---
+
+## What Makes The Arbiter Different
+
+### 1. It separates roles on purpose
+Generation, review, repair, and consolidation are not collapsed into one vague “agent loop.”
+
+That means the system can:
+- ask for missing information early
+- challenge the draft from multiple angles
+- avoid feeding raw noisy criticism directly back into the generator
+
+### 2. It distinguishes score from trust
+The Arbiter does not treat “high score” as the same thing as “safe result.”
+
+It tracks:
+- `score`
+- `validity`
+- `confidence`
+- `verification`
+- `readiness`
+
+So a result can look strong and still be marked as needing review, caution, or further work.
+
+### 3. It uses Janitor-led retries
+Retries are not driven by a messy wall of critic text.
+
+The Janitor compresses the situation into:
 - what is still broken
-- what should be preserved
-- what changed
+- what was resolved
+- what regressed
+- what to preserve
 - what the next repair must do
 
-This makes retries much less chaotic.
+This makes second and third passes much more stable.
 
-### 4. Memory with trust states
-Arbiter stores more than just “history.” Each memory entry is classified and managed as:
+### 4. It learns across runs
+The Arbiter stores:
+- run history
+- repair patterns
+- memory trust states
+- manual project notes
+
+It does not just remember “what happened.”
+It remembers **what is worth reusing**.
+
+### 5. It gives the operator real control
+The system supports:
+- Groq
+- OpenAI
+- Gemini
+- Anthropic / Claude
+- Ollama for local testing
+
+And exposes:
+- AI presets
+- manual role-by-role selection
+- provider lock
+- stable mode
+- autonomous loop settings
+
+That means you can trade off cost, speed, stability, and quality consciously instead of guessing.
+
+---
+
+## Core Capabilities
+
+### Multi-agent orchestration
+The Arbiter turns a single AI request into a controlled decision flow across multiple roles with distinct responsibilities.
+
+### Preflight before critic spend
+Broken or incomplete outputs can be caught before the system burns extra cost on full review rounds.
+
+### Verification-aware scoring
+The final score is no longer just “what the critics felt.”
+Deterministic verification now lightly calibrates the final number so an `8/10` is closer to a real `8/10`.
+
+### Readiness signals
+Each result can be surfaced as:
+- `READY`
+- `CLOSE`
+- `NEEDS REVIEW`
+- `BLOCKED`
+
+This is much more practical than a raw score alone.
+
+### Memory lifecycle management
+Memory entries are governed as:
 - `active`
 - `caution`
 - `conflicted`
 - `obsolete`
 
-So stronger valid runs can supersede weaker ones, and low-trust diagnostic runs do not silently become “truth.”
+This helps The Arbiter reuse good lessons without turning every past run into permanent truth.
 
-### 5. Task-mode-aware scoring
-Arbiter does not use one naive scoring formula for everything.
+### Benchmark and evaluation tracking
+The project tracks:
+- score
+- cost
+- iterations
+- validity rate
+- verified rate
+- ready rate
 
-Examples:
-- `Software & IT` weights technical quality more heavily
-- `Marketing & Growth` weights logic and strategic coherence more heavily
-- `Writing & Content` weighs structure and outcome fit differently than code generation
+So improvements can be measured over time, not just felt.
 
-### 6. Provider and model control
-Arbiter supports:
-- Groq
-- OpenAI
-- Gemini
-- Anthropic / Claude
-- Ollama (sandbox/testing mode)
-
-And it exposes:
-- `Provider Lock`
-- `Stable Mode`
-- model presets
-- manual role-by-role control
-
-That makes it much easier to operate predictably under real cost constraints.
+### Local experimentation
+There is a sandbox path for local/Ollama testing so prompt and orchestration behavior can be improved without constantly paying for API calls.
 
 ---
 
-## Expected efficiency gains
+## Where It Saves Time and Cost
 
-Arbiter is built to improve more than answer quality. It is also designed to reduce wasted runtime, wasted review cycles, and wasted API spend.
-
-These are **directional architecture-level estimates**, not formal benchmark claims:
+These are **directional design benefits**, not formal benchmark claims:
 
 - `~1 full critic round avoided`
-  on structurally broken outputs when preflight catches failures before the full review loop spends more money
+  when preflight blocks structurally broken outputs before full review spend
 
-- `~1–2 noisy retry cycles reduced`
-  in drift-heavy runs when Janitor compresses multiple reviewer signals into one repair brief
-
-- `~lower review waste in failure-heavy workflows`
-  because invalid outputs can be blocked, repaired, downgraded, or stopped before they trigger repeated cross-agent churn
-
-- `~faster convergence on similar tasks`
-  when the Architect retrieves prior repair patterns, trusted memory, and project notes instead of rebuilding context from zero every time
+- `~1–2 noisy retries reduced`
+  when Janitor compresses multiple reviewer signals into one repair brief
 
 - `~lower experimentation cost`
-  when prompt, role, and retry behavior are tested through Groq budget presets or local Ollama flows before moving into more expensive configurations
+  when local/Ollama testing or cheaper Groq presets are used to refine behavior before higher-cost runs
+
+- `~faster convergence on repeated task families`
+  when the Architect can reuse prior repair patterns and trusted memory instead of rebuilding context from zero
 
 - `~higher operator trust`
-  because Arbiter makes run status, reviewer confidence, provider limits, retry structure, and memory state visible instead of burying them inside a single opaque response
+  because The Arbiter makes failure modes, validity, provider issues, and retry status explicit instead of hiding them behind one final answer
 
-In practical terms, Arbiter is meant to move AI usage away from:
-- repeated blind prompting
-- duplicated reviewer spend
+In short:
+The Arbiter is built to reduce:
+- blind prompting
+- duplicated review spend
 - unstable retries
 - silent provider drift
 
-and toward:
-- controlled iteration
-- reusable learning
-- explicit repair logic
-- better cost/quality predictability
+and increase:
+- controllability
+- reuse
+- clarity
+- trust
 
 ---
 
-## What makes Arbiter different
+## Task Modes
 
-There are plenty of “AI agents” projects. Most are thin wrappers around model calls.
+The Arbiter is not software-only.
 
-Arbiter is different because it treats orchestration as a systems problem:
+It supports task-aware behavior across:
+- `Software & IT`
+- `Marketing & Growth`
+- `Business & Operations`
+- `Writing & Content`
+- `Personal Planning`
+- `General Problem Solving`
 
-- **It separates roles intentionally**
-  generation, review, repair, and consolidation are not collapsed into one vague loop
+Each mode changes:
+- auditing emphasis
+- generation guidance
+- review weighting
+- validation expectations
 
-- **It models trust explicitly**
-  not every run, memory, or score is treated as equally reliable
-
-- **It gives the user real control**
-  presets for simplicity, manual role configuration for advanced use
-
-- **It distinguishes confirmed defects from speculation**
-  critics separate:
-  - confirmed defects
-  - risks / assumptions
-  - improvements
-
-- **It is designed for repeated use**
-  memory, retrieval, provider fallback, cooldowns, and retry structure all support long-lived operation
-
-In other words, Arbiter is closer to a **small AI reasoning platform** than a simple prompt UI.
+That means a software task and a growth strategy task are not scored with the same naive rubric.
 
 ---
 
-## System architecture
+## How The Loop Works
+
+1. User submits a task
+2. Auditor checks whether the task is clear enough
+3. Architect produces the draft
+4. Preflight validates the draft locally
+5. Critics evaluate technical and logical quality
+6. Janitor consolidates the dispute
+7. The Arbiter either:
+   - accepts the result
+   - retries with Janitor context
+   - or stops honestly with a diagnostic / blocked / review-degraded state
+
+This is not just “loop until number gets bigger.”
+It is a governed improvement cycle.
+
+---
+
+## Product UX
+
+The current app is designed as a product workspace, not a debug console.
+
+The visible surface emphasizes:
+- the brief
+- the draft
+- the final order
+- Janitor resolution
+- intelligence signals
+- animated role flow
+
+Internal systems like benchmarking, memory governance, and diagnostics can stay in the backend or be exposed selectively when needed.
+
+The point is for the user to feel:
+- what The Arbiter is doing
+- why it made that decision
+- whether the result is actually trustworthy
+
+without forcing them to stare at raw internals all the time.
+
+---
+
+## Repository Structure
 
 ```text
 arbiter/
@@ -202,212 +302,141 @@ arbiter/
   prompts/
 ```
 
-Important modules:
+Key modules:
 
-- `arbiter/app/streamlit_app.py`
+- [`arbiter/app/streamlit_app.py`](arbiter/app/streamlit_app.py)
   main production UI
 
-- `arbiter/app/app_test.py`
-  sandbox UI for local and experimental testing
+- [`arbiter/app/app_test.py`](arbiter/app/app_test.py)
+  sandbox / local experimentation surface
 
-- `arbiter/core/orchestrator.py`
-  top-level control flow
+- [`arbiter/core/orchestrator.py`](arbiter/core/orchestrator.py)
+  high-level control flow
 
-- `arbiter/core/iteration_engine.py`
-  Architect → preflight → critics → Janitor → scoring loop
+- [`arbiter/core/iteration_engine.py`](arbiter/core/iteration_engine.py)
+  main intelligence loop
 
-- `arbiter/core/preflight.py`
-  deterministic validation layer
+- [`arbiter/core/preflight.py`](arbiter/core/preflight.py)
+  deterministic structural validation
 
-- `arbiter/infra/model_selector.py`
-  model routing, provider lock, fallback, cooldown logic
+- [`arbiter/core/final_verifier.py`](arbiter/core/final_verifier.py)
+  grounded post-generation verification layer
 
-- `arbiter/infra/memory_store.py`
-  persistent run memory, lifecycle management, project notes, retrieval
+- [`arbiter/infra/model_selector.py`](arbiter/infra/model_selector.py)
+  provider lock, role overrides, fallback, cooldown logic
 
-- `arbiter/prompts/registry.py`
-  task-aware prompt construction and Architect history injection
+- [`arbiter/infra/memory_store.py`](arbiter/infra/memory_store.py)
+  persistent run memory, lifecycle control, project notes, retrieval
 
----
+- [`arbiter/infra/benchmark_store.py`](arbiter/infra/benchmark_store.py)
+  run-level metrics and evaluation history
 
-## End-to-end flow
-
-1. User submits a task
-2. Auditor checks whether the task is sufficiently specified
-3. Architect generates a solution
-4. Preflight validates the output locally
-5. Tech Critic and Logic Critic review the solution
-6. Janitor consolidates the outcome into a repair brief
-7. Arbiter either:
-   - accepts the round
-   - retries using Janitor context
-   - or stops honestly with a diagnostic / provider-limited state
-
-This is not just “loop until score improves.”
-It is a controlled, role-aware, memory-aware decision cycle.
+- [`arbiter/prompts/registry.py`](arbiter/prompts/registry.py)
+  task-aware prompt construction and memory-aware Architect context
 
 ---
 
-## Memory and lightweight learning
+## Installation
 
-Arbiter includes three distinct memory layers:
-
-### Working memory
-Per-run context such as:
-- latest solution
-- resolved / pending / regressed issues
-- Janitor repair brief
-
-### Persistent run memory
-Stored locally in:
-- `.arbiter_memory/memory_entries.jsonl`
-- optional Chroma store in `.arbiter_memory/chroma/`
-
-This memory captures:
-- task patterns
-- preflight issues
-- defect patterns
-- repair lessons
-- trust status
-
-### Project memory / notes
-Persistent manual notes stored separately so the user can save durable guidance for future similar tasks.
-
-This is not full model training, but it is a useful form of **retrieval-guided adaptation**:
-- better reuse of successful repair patterns
-- less repetition of known failure shapes
-- more context-aware Architect behavior over time
-
----
-
-## Presets and model strategy
-
-Arbiter now supports named presets so users do not need to understand every provider/model tradeoff to get started.
-
-Examples include:
-- `Starter - Free Stable`
-- `Cheap Test - Groq Lite`
-- `Software Builder`
-- `Strategy & Writing`
-- `Business Operator`
-- `Premium Claude Cross-Check`
-
-For advanced users, manual role-by-role configuration is also available for:
-- Architect
-- Auditor
-- Tech Critic
-- Logic Critic
-- Janitor
-- Repair
-
-This dual approach keeps the system accessible for non-experts while still giving full control to power users.
-
----
-
-## Supported task modes
-
-Arbiter is designed to work across multiple domains, not just code:
-
-- `Software & IT`
-- `Marketing & Growth`
-- `Business & Operations`
-- `Writing & Content`
-- `Personal Planning`
-- `General Problem Solving`
-
-The system adapts prompts, validation emphasis, and score weighting based on the selected mode.
-
----
-
-## Running the project
-
-### Main app
+Create and activate your environment, then install dependencies:
 
 ```bash
-cd /Users/lucaomul/TheArbiter
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Set your provider keys in `.env` as needed:
+
+```env
+GROQ_API_KEY=...
+OPENAI_API_KEY=...
+GEMINI_API_KEY=...
+ANTHROPIC_API_KEY=...
+```
+
+You do not need all providers at once.
+
+---
+
+## Running The App
+
+Main app:
+
+```bash
 python3 -m streamlit run arbiter/app/streamlit_app.py
 ```
 
-### Sandbox / experimental app
+Sandbox / local testing:
 
 ```bash
-cd /Users/lucaomul/TheArbiter
 python3 -m streamlit run arbiter/app/app_test.py
 ```
 
 ---
 
-## Environment variables
+## Recommended Usage Modes
 
-Create a `.env` file in the project root:
+### Starter - Free Stable
+Best default for most users:
+- Groq-first
+- stable
+- cheap
+- predictable
 
-```env
-OPENAI_API_KEY=...
-GEMINI_API_KEY=...
-GROQ_API_KEY=...
-ANTHROPIC_API_KEY=...
-```
+### Cheap Test - Groq Lite
+Good for quick rough iterations and lower-cost experimentation.
 
-If you want to use Ollama locally:
+### Software Builder
+Best for technical build tasks with stronger review pressure.
 
-```bash
-ollama serve
-```
+### Strategy & Writing
+Better suited for structured reasoning, positioning, writing, and planning.
 
----
+### Business Operator
+Good fit for workflows, SOPs, service design, and operating systems.
 
-## Recommended usage
-
-### If you want the simplest reliable path
-Use a preset and keep manual customization off.
-
-### If you want cost-efficient testing
-Use:
-- `Cheap Test - Groq Lite`
-or the sandbox with Ollama
-
-### If you want stronger software output
-Use:
-- `Software Builder`
-
-### If you want stronger strategy / writing output
-Use:
-- `Strategy & Writing`
-
-### If you want full control
-Enable manual mode and pick providers/models role by role.
+### Premium Claude Cross-Check
+For harder tasks where you want stronger model diversity and higher-end output quality.
 
 ---
 
-## Current direction
+## What The Arbiter Is Not
 
-Arbiter is evolving toward a more serious AI systems layer, with emphasis on:
-- stronger retry intelligence
-- better trust-aware memory
-- broader domain validation
-- cleaner UX
-- lower-cost experimentation
-- more explicit reasoning transparency
+The Arbiter is not:
+- a guaranteed-truth engine
+- a perfect autonomous system
+- a replacement for execution, testing, or human judgment in high-stakes cases
 
-The long-term goal is not just to orchestrate models, but to make the system progressively better at knowing:
-- what failed
-- what improved
-- what should be reused
-- what should no longer be trusted
+It is a system for producing **better, more challenge-tested, more interpretable outputs** than a single unchallenged model response.
+
+That distinction matters.
 
 ---
 
-## Author
+## Current Status
 
-**Luca Crăciun**
+The project is already far beyond “prompt demo” territory.
 
-- GitHub: [github.com/lucaomul](https://github.com/lucaomul)
-- LinkedIn: [linkedin.com/in/gabriel-luca-craciun-25ba95295](https://www.linkedin.com/in/gabriel-luca-craciun-25ba95295)
+It currently has:
+- a differentiated product identity
+- a real multi-agent loop
+- trust-aware memory
+- verification-aware scoring
+- benchmark instrumentation
+- UI designed as a usable workspace
+
+The next frontier is continued hardening:
+- stronger domain-specific validators
+- richer benchmark comparisons
+- deeper execution verification
+- more long-term calibration from real usage
+
+In other words:
+The Arbiter is already a serious system, and it is still getting sharper.
 
 ---
 
-## Final thought
+## License
 
-Arbiter is built around a principle that more AI products should adopt:
-
-> AI systems become more useful when they are designed to doubt, inspect, and repair themselves before asking the user to trust them.
+Add the license that matches your intended distribution model.

@@ -10,9 +10,11 @@ from arbiter.core.scoring import Scorer
 from arbiter.core.stopping import Stopper
 from arbiter.core.learning.optimizer import LearningOptimizer
 from arbiter.core.preflight import PreflightValidator
+from arbiter.core.final_verifier import FinalVerifier, VerificationResult
 from arbiter.prompts.registry import PromptRegistry
 from arbiter.config.settings import SETTINGS
 from arbiter.infra.memory_store import get_memory_store
+from arbiter.infra.benchmark_store import get_benchmark_store
 
 
 class IterationEngine:
@@ -28,6 +30,7 @@ class IterationEngine:
         target_score: float = 8.0,
         max_iterations: int = 5,
         stable_mode: bool = False,
+        benchmark_mode: bool = False,
         on_iteration_complete=None,
     ):
         self.runner    = AgentRunner(registry)
@@ -40,8 +43,11 @@ class IterationEngine:
         )
         self.optimizer = LearningOptimizer()
         self.preflight = PreflightValidator()
+        self.verifier = FinalVerifier()
         self.memory = get_memory_store()
+        self.benchmarks = get_benchmark_store()
         self.stable_mode = stable_mode
+        self.benchmark_mode = benchmark_mode
         # Optional callback: on_iteration_complete(state, record) for UI updates
         self.on_iteration_complete = on_iteration_complete
 
@@ -51,6 +57,7 @@ class IterationEngine:
 
         while not stop:
             state.iteration += 1
+            self.runner.current_iteration = state.iteration
             recommendations = self.optimizer.optimize(state)
 
             # Context for model selector
@@ -58,6 +65,7 @@ class IterationEngine:
                 "last_tech_score": state.last_tech_score,
                 "force_quality":   recommendations.get("architect_model") == "gpt-4o" and not self.stable_mode,
                 "stable_mode": self.stable_mode,
+                "iteration": state.iteration,
             }
 
             # ── 1. Build history string ──────────────────────
@@ -99,6 +107,11 @@ class IterationEngine:
                     validity_status="PROVIDER LIMITED",
                     score_status="diagnostic",
                     review_confidence="low",
+                    verification_status="BLOCKED",
+                    verification_score=0.0,
+                    verification_summary="Provider failure blocked verification for this round.",
+                    verification_checks=[{"name": "provider_gate", "status": "fail", "detail": "Architect generation was blocked by a provider issue."}],
+                    ship_readiness="BLOCKED",
                     tech_critique=proposal_error.get("critique", "Architect provider error."),
                     logic_critique="Architect generation did not complete, so no logic review was run.",
                     fix=proposal_error.get("fix_suggestion", "Retry later or switch models."),
@@ -127,6 +140,10 @@ class IterationEngine:
                     validity_status=record.validity_status,
                     score_status=record.score_status,
                     review_confidence=record.review_confidence,
+                    verification_status=record.verification_status,
+                    verification_score=record.verification_score,
+                    verification_summary=record.verification_summary,
+                    ship_readiness=record.ship_readiness,
                     run_id=run_id,
                     source_trace={
                         "architect_model": record.architect_model,
@@ -275,6 +292,11 @@ class IterationEngine:
                     validity_status="DIAGNOSTIC ONLY",
                     score_status="diagnostic",
                     review_confidence="low" if (critic_redundancy or diagnostic_provider_error) else "normal",
+                    verification_status="BLOCKED",
+                    verification_score=0.0,
+                    verification_summary="Structural preflight issues blocked final verification.",
+                    verification_checks=[{"name": "preflight_gate", "status": "fail", "detail": "Preflight issues must be repaired before a clean verification pass."}],
+                    ship_readiness="BLOCKED",
                     critic_overlap=critic_overlap if SETTINGS.allow_diagnostic_critics_on_preflight_fail else 0.0,
                     critic_redundancy=critic_redundancy if SETTINGS.allow_diagnostic_critics_on_preflight_fail else False,
                     tech_confirmed_defects=t_res.get("confirmed_defects", []),
@@ -320,6 +342,10 @@ class IterationEngine:
                     validity_status=record.validity_status,
                     score_status=record.score_status,
                     review_confidence=record.review_confidence,
+                    verification_status=record.verification_status,
+                    verification_score=record.verification_score,
+                    verification_summary=record.verification_summary,
+                    ship_readiness=record.ship_readiness,
                     run_id=run_id,
                     source_trace={
                         "architect_model": record.architect_model,
@@ -390,13 +416,33 @@ class IterationEngine:
             state.track_cost("Janitor", self.runner.model_cost(janitor_model))
 
             # ── 4. Score ─────────────────────────────────────
-            avg_score = self.scorer.compute(t_res, l_res, task_mode=state.task_mode)
+            raw_avg_score = self.scorer.compute(t_res, l_res, task_mode=state.task_mode)
             t_score   = t_res.get("score", 1)
             l_score   = l_res.get("score", 1)
             provider_error = bool(t_res.get("provider_error") or l_res.get("provider_error"))
             validity_status = "REVIEW DEGRADED" if provider_error else "VALID"
             score_status = "diagnostic" if provider_error else "final"
-            review_confidence = "low" if (critic_redundancy or provider_error) else "normal"
+            verification = self._run_verification(
+                state=state,
+                proposal=proposal,
+                preflight_issues=preflight_issues,
+                tech_result=t_res,
+                logic_result=l_res,
+                provider_error=provider_error,
+            )
+            avg_score = self._calibrate_score(raw_avg_score, verification)
+            review_confidence = self._derive_review_confidence(
+                critic_redundancy=critic_redundancy,
+                provider_error=provider_error,
+                verification=verification,
+            )
+            ship_readiness = self._derive_ship_readiness(
+                validity_status=validity_status,
+                verification=verification,
+                tech_result=t_res,
+                logic_result=l_res,
+                review_confidence=review_confidence,
+            )
 
             # ── 5. Build critique message ────────────────────
             critique_content = self._build_critique_html(t_score, l_score, avg_score, t_res, l_res, debate)
@@ -411,6 +457,11 @@ class IterationEngine:
                 validity_status=validity_status,
                 score_status=score_status,
                 review_confidence=review_confidence,
+                verification_status=verification.status,
+                verification_score=verification.score,
+                verification_summary=verification.summary,
+                verification_checks=verification.checks,
+                ship_readiness=ship_readiness,
                 critic_overlap=critic_overlap,
                 critic_redundancy=critic_redundancy,
                 tech_confirmed_defects=t_res.get("confirmed_defects", []),
@@ -455,6 +506,10 @@ class IterationEngine:
                 validity_status=record.validity_status,
                 score_status=record.score_status,
                 review_confidence=record.review_confidence,
+                verification_status=record.verification_status,
+                verification_score=record.verification_score,
+                verification_summary=record.verification_summary,
+                ship_readiness=record.ship_readiness,
                 run_id=run_id,
                 source_trace={
                     "architect_model": record.architect_model,
@@ -482,6 +537,30 @@ class IterationEngine:
             # ── 7. Stop check ────────────────────────────────
             stop, reason = self.stopper.should_stop(state)
 
+        latest_validity = state.iteration_history[-1]["validity_status"] if state.iteration_history else "IDLE"
+        latest_score_status = state.iteration_history[-1].get("score_status", "final") if state.iteration_history else "final"
+        latest_verification_status = state.iteration_history[-1].get("verification_status", "UNVERIFIED") if state.iteration_history else "UNVERIFIED"
+        latest_ship_readiness = state.iteration_history[-1].get("ship_readiness", "UNASSESSED") if state.iteration_history else "UNASSESSED"
+        self.benchmarks.record_run(
+            task_mode=state.task_mode,
+            run_id=run_id,
+            best_score=state.best_iteration["avg"] if state.best_iteration else state.last_avg_score,
+            iteration_count=state.iteration,
+            total_cost=state.costs.get("Total", 0.0),
+            validity_status=latest_validity,
+            score_status=latest_score_status,
+            verification_status=latest_verification_status,
+            ship_readiness=latest_ship_readiness,
+            stop_reason=reason,
+            preflight_events=state.preflight_events,
+            repair_events=state.repair_events,
+            benchmark_mode=state.benchmark_mode,
+            benchmark_strategy=state.benchmark_strategy,
+            benchmark_pack=state.benchmark_pack,
+            benchmark_case_id=state.benchmark_case_id,
+            benchmark_case_title=state.benchmark_case_title,
+        )
+
         return ArbiterResult(
             best_solution=state.best_solution or state.current_solution,
             best_score=state.best_iteration["avg"] if state.best_iteration else state.last_avg_score,
@@ -504,9 +583,15 @@ class IterationEngine:
                 "unresolved_issues": state.unresolved_issues,
                 "model_usage": state.model_usage,
                 "memory_stats": self.memory.stats(),
+                "benchmark_stats": self.benchmarks.stats(),
+                "benchmark_by_task_mode": self.benchmarks.by_task_mode(),
+                "benchmark_by_strategy": self.benchmarks.by_strategy(),
+                "benchmark_by_case": self.benchmarks.by_case(),
+                "recent_benchmarks": self.benchmarks.recent_runs(8),
+                "decision_trace": self.runner.decision_log.to_dict_list(),
                 "current_solution": state.current_solution,
                 "latest_janitor_report": state.latest_janitor_report,
-                "latest_result_status": state.iteration_history[-1]["validity_status"] if state.iteration_history else "IDLE",
+                "latest_result_status": latest_validity,
                 "run_id": run_id,
             },
         )
@@ -540,6 +625,79 @@ class IterationEngine:
             "PREVIOUS UNRESOLVED ISSUES:\n"
             f"{unresolved}\n"
         )
+
+    def _run_verification(
+        self,
+        state: ArbiterState,
+        proposal: str,
+        preflight_issues: list,
+        tech_result: dict,
+        logic_result: dict,
+        provider_error: bool,
+    ) -> VerificationResult:
+        if not SETTINGS.final_validation_enabled:
+            return VerificationResult(
+                status="UNVERIFIED",
+                confidence="normal",
+                score=0.0,
+                summary="Deterministic verification is disabled for this environment.",
+                checks=[],
+            )
+        return self.verifier.verify(
+            task_mode=state.task_mode,
+            task_text=state.current_task or state.user_input,
+            solution=proposal,
+            preflight_issues=preflight_issues,
+            tech_confirmed_defects=tech_result.get("confirmed_defects", []),
+            logic_confirmed_defects=logic_result.get("confirmed_defects", []),
+            provider_error=provider_error,
+        )
+
+    @staticmethod
+    def _calibrate_score(raw_avg_score: float, verification: VerificationResult) -> float:
+        base = float(raw_avg_score or 0.0)
+        if verification.status == "VERIFIED":
+            return round(base, 2)
+
+        verification_equivalent = float(verification.score or 0.0) * 10.0
+        blended = round((base * 0.8) + (verification_equivalent * 0.2), 2)
+
+        if verification.status == "CAUTION":
+            return max(1.0, min(base, blended))
+        if verification.status == "FAILED":
+            return max(1.0, min(blended, 6.5))
+        if verification.status == "BLOCKED":
+            return max(1.0, min(blended, 5.5))
+        return max(1.0, min(10.0, round(base, 2)))
+
+    @staticmethod
+    def _derive_review_confidence(critic_redundancy: bool, provider_error: bool, verification: VerificationResult) -> str:
+        if provider_error or verification.status in {"FAILED", "BLOCKED"}:
+            return "low"
+        if critic_redundancy or verification.status == "CAUTION":
+            return "guarded"
+        if verification.status == "VERIFIED":
+            return "high"
+        return "normal"
+
+    @staticmethod
+    def _derive_ship_readiness(
+        validity_status: str,
+        verification: VerificationResult,
+        tech_result: dict,
+        logic_result: dict,
+        review_confidence: str,
+    ) -> str:
+        confirmed = len(tech_result.get("confirmed_defects", []) or []) + len(logic_result.get("confirmed_defects", []) or [])
+        if validity_status != "VALID" or verification.status in {"FAILED", "BLOCKED"}:
+            return "BLOCKED"
+        if confirmed > 0:
+            return "NEEDS REVIEW"
+        if verification.status == "CAUTION" or review_confidence in {"guarded", "low"}:
+            return "CLOSE"
+        if verification.status == "VERIFIED" and review_confidence in {"high", "normal"}:
+            return "READY"
+        return "UNASSESSED"
 
     @staticmethod
     def _tokenize_text(text: str) -> set:

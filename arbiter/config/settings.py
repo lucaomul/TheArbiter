@@ -30,7 +30,7 @@ class Settings:
     max_preflight_repairs: int = 1
     allow_diagnostic_critics_on_preflight_fail: bool = True
     critic_debate_enabled: bool = True
-    final_validation_enabled: bool = False
+    final_validation_enabled: bool = True
 
     # Provider resilience
     rate_limit_cooldown_seconds: int = 45 * 60

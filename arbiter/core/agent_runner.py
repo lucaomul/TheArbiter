@@ -12,6 +12,7 @@ from arbiter.agents.base_agent import (
 from arbiter.prompts.registry import PromptRegistry
 from arbiter.infra.model_selector import get_model_selector
 from arbiter.infra.performance_store import get_performance_store
+from arbiter.infra.decision_log import DecisionLog
 from arbiter.config.settings import PRICES, SETTINGS
 
 
@@ -25,6 +26,8 @@ class AgentRunner:
         self.registry  = registry
         self.selector  = get_model_selector()
         self.perf      = get_performance_store()
+        self.decision_log = DecisionLog()
+        self.current_iteration = 0
 
     def run_auditor(self, task: str, context: dict = None) -> dict:
         prompt = self.registry.get("Auditor")
@@ -156,7 +159,13 @@ class AgentRunner:
         return self._normalize_debate_result(result), "llama-3.1-8b-instant"
 
     def _candidate_models(self, agent: str, context: dict = None) -> list[str]:
-        primary_model, _ = self.selector.choose(agent, context)
+        context = context or {}
+        primary_model, _ = self.selector.choose(
+            agent,
+            context,
+            decision_log=self.decision_log,
+            iteration=context.get("iteration", self.current_iteration),
+        )
         fallbacks = self.selector.fallback_models(agent, primary_model)
         ordered = [primary_model] + [model for model in fallbacks if model != primary_model]
         seen = set()
@@ -179,6 +188,18 @@ class AgentRunner:
         else:
             cooldown = SETTINGS.provider_error_cooldown_seconds
         self.selector.mark_temporarily_unavailable(model, cooldown)
+        self.decision_log.record(
+            category="provider_cooldown",
+            summary=f"{model} temporarily cooled down",
+            reason=f"{error_type} triggered cooldown of {cooldown}s",
+            confidence="high" if error_type in {"rate_limit", "model_decommissioned"} else "medium",
+            iteration=self.current_iteration,
+            metadata={
+                "model": model,
+                "error_type": error_type,
+                "cooldown_seconds": cooldown,
+            },
+        )
 
     @staticmethod
     def _normalize_debate_result(result: dict) -> dict:

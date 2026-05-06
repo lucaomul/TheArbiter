@@ -15,6 +15,11 @@ class IterationRecord:
     validity_status: str = "VALID"
     score_status: str = "final"
     review_confidence: str = "normal"
+    verification_status: str = "UNVERIFIED"
+    verification_score: float = 0.0
+    verification_summary: str = ""
+    verification_checks: list[dict] = field(default_factory=list)
+    ship_readiness: str = "UNASSESSED"
     critic_overlap: float = 0.0
     critic_redundancy: bool = False
     tech_confirmed_defects: list[str] = field(default_factory=list)
@@ -59,6 +64,11 @@ class ArbiterState:
     last_tech_score: Optional[int] = None
     rewrite_mode: bool = False
     stable_mode: bool = False
+    benchmark_mode: bool = False
+    benchmark_strategy: str = ""
+    benchmark_pack: str = ""
+    benchmark_case_id: str = ""
+    benchmark_case_title: str = ""
     pending_questions: list[str] = field(default_factory=list)
 
     # History
@@ -96,16 +106,32 @@ class ArbiterState:
         "Total": 0.0,
     })
 
+    @staticmethod
+    def _verification_bonus(status: str) -> float:
+        return {
+            "VERIFIED": 0.6,
+            "CAUTION": 0.1,
+            "UNVERIFIED": 0.0,
+            "FAILED": -1.0,
+            "BLOCKED": -2.0,
+        }.get(str(status or "UNVERIFIED").upper(), 0.0)
+
     def update_best(self, avg: float, solution: str, iteration_record: dict):
+        current_effective = float(avg or 0.0) + self._verification_bonus(iteration_record.get("verification_status", "UNVERIFIED"))
+        best_effective = -999.0
+        if self.best_iteration is not None:
+            best_effective = float(self.best_iteration.get("avg", 0.0) or 0.0) + self._verification_bonus(
+                self.best_iteration.get("verification_status", "UNVERIFIED")
+            )
         if (
             self.best_iteration is None
-            or avg > self.best_iteration["avg"]
+            or current_effective > best_effective
             or (
-                avg == self.best_iteration["avg"]
+                current_effective == best_effective
                 and iteration_record.get("tech", 0) > self.best_iteration.get("tech", 0)
             )
             or (
-                avg == self.best_iteration["avg"]
+                current_effective == best_effective
                 and iteration_record.get("tech", 0) == self.best_iteration.get("tech", 0)
                 and iteration_record.get("logic", 0) > self.best_iteration.get("logic", 0)
             )
@@ -203,6 +229,11 @@ class ArbiterState:
             "validity_status": getattr(record, "validity_status", "VALID"),
             "score_status": getattr(record, "score_status", "final"),
             "review_confidence": getattr(record, "review_confidence", "normal"),
+            "verification_status": getattr(record, "verification_status", "UNVERIFIED"),
+            "verification_score": getattr(record, "verification_score", 0.0),
+            "verification_summary": getattr(record, "verification_summary", ""),
+            "verification_checks": getattr(record, "verification_checks", []),
+            "ship_readiness": getattr(record, "ship_readiness", "UNASSESSED"),
             "critic_overlap": getattr(record, "critic_overlap", 0.0),
             "critic_redundancy": getattr(record, "critic_redundancy", False),
             "tech_confirmed_defects": getattr(record, "tech_confirmed_defects", []),
@@ -255,6 +286,7 @@ class ArbiterState:
                 "tech":  record.tech,
                 "logic": record.logic,
                 "avg":   record.avg,
+                "verification_status": getattr(record, "verification_status", "UNVERIFIED"),
             })
 
     def track_cost(self, role: str, amount: float):

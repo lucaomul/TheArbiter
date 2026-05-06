@@ -32,9 +32,22 @@ class Stopper:
         if state.iteration >= self.max_iterations:
             return True, f"Max iterations ({self.max_iterations}) reached."
 
-        # Target score reached
-        if state.last_avg_score >= self.target_score:
-            return True, f"Target score {self.target_score} reached — avg: {state.last_avg_score:.1f}."
+        latest = state.iteration_history[-1] if state.iteration_history else {}
+        verification_status = str(latest.get("verification_status", "UNVERIFIED")).upper()
+
+        # Ideal ceiling
+        if state.last_avg_score >= 9.95:
+            return True, f"Near-perfect score reached — avg: {state.last_avg_score:.1f}."
+
+        if verification_status == "VERIFIED" and state.last_avg_score >= 9.5:
+            return True, f"High-confidence result reached — avg: {state.last_avg_score:.1f}."
+
+        # Target score acts as a floor, not an instant stop.
+        if state.last_avg_score >= self.target_score and self._is_satisfactory_plateau(state):
+            return True, (
+                f"Minimum target {self.target_score} was reached and later rounds plateaued "
+                f"around {state.last_avg_score:.1f}."
+            )
 
         if state.recent_low_tech_count >= 2:
             return True, "Failure-budget guardrail triggered — too many recent low technical scores."
@@ -60,3 +73,14 @@ class Stopper:
             return False
         recent_scores = [h["avg"] for h in history[-self.plateau_rounds:]]
         return len(set(recent_scores)) == 1
+
+    def _is_satisfactory_plateau(self, state: ArbiterState) -> bool:
+        history = state.iteration_history
+        if len(history) < 2:
+            return False
+        recent = history[-2:]
+        if not all(float(item.get("avg", 0.0) or 0.0) >= self.target_score for item in recent):
+            return False
+        improvement = float(recent[-1].get("avg", 0.0) or 0.0) - float(recent[-2].get("avg", 0.0) or 0.0)
+        same_verification = str(recent[-1].get("verification_status", "")) == str(recent[-2].get("verification_status", ""))
+        return improvement <= 0.15 and same_verification
