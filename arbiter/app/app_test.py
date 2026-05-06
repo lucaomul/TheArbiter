@@ -1,9 +1,8 @@
 import streamlit as st
-import html
 import sys
 import json
 from pathlib import Path
-from urllib import error, request
+from urllib import request
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

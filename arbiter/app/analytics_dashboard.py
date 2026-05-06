@@ -2,7 +2,8 @@ import asyncio
 import csv
 import io
 import json
-import math
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from statistics import mean, median, pstdev
 
 import streamlit as st
@@ -26,6 +27,14 @@ from arbiter.infra.db import (
 from arbiter.infra.memory_store import get_memory_store
 from arbiter.infra.plugin_registry import get_plugin_registry
 
+try:
+    from arbiter import __version__
+except ImportError:
+    try:
+        __version__ = version("the-arbiter")
+    except PackageNotFoundError:
+        __version__ = "0.1.0"
+
 
 st.set_page_config(
     page_title="The Arbiter Analytics",
@@ -46,6 +55,13 @@ def summary_cards(items):
             "</div>"
         )
     st.markdown("<div class='summary-grid'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
+def truncate_text(text: str, limit: int = 180) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 16].rstrip() + "... [truncated]"
 
 
 def run_async(coro, default):
@@ -166,6 +182,52 @@ def export_csv_text(runs: list[dict]) -> str:
     return buffer.getvalue()
 
 
+def breakdown_rows(runs: list[dict], field: str, default: str = "UNKNOWN") -> list[dict]:
+    counts: dict[str, int] = {}
+    for run in runs:
+        value = str(run.get(field, default) or default)
+        counts[value] = counts.get(value, 0) + 1
+    return [
+        {"label": key, "count": value}
+        for key, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def filter_runs(
+    runs: list[dict],
+    mode_filter: str = "All",
+    readiness_filter: str = "All",
+    verification_filter: str = "All",
+    search_text: str = "",
+) -> list[dict]:
+    query = str(search_text or "").strip().lower()
+    filtered = []
+    for run in runs:
+        if mode_filter != "All" and run.get("task_mode") != mode_filter:
+            continue
+        if readiness_filter != "All" and run.get("ship_readiness") != readiness_filter:
+            continue
+        if verification_filter != "All" and run.get("verification_status") != verification_filter:
+            continue
+
+        if query:
+            metadata = dict(run.get("run_metadata", {}) or {})
+            searchable = " ".join(
+                [
+                    str(run.get("id", "")),
+                    str(run.get("task_mode", "")),
+                    str(run.get("user_input", "")),
+                    str(run.get("best_solution", "")),
+                    str(metadata.get("benchmark_case_title", "")),
+                    str(metadata.get("benchmark_strategy", "")),
+                ]
+            ).lower()
+            if query not in searchable:
+                continue
+        filtered.append(run)
+    return filtered
+
+
 def benchmark_stats_table(runs: list[dict]) -> list[dict]:
     grouped: dict[str, list[dict]] = {}
     for run in runs:
@@ -187,6 +249,28 @@ def benchmark_stats_table(runs: list[dict]) -> list[dict]:
             }
         )
     return sorted(rows, key=lambda item: item["task_mode"])
+
+
+def benchmark_strategy_rows(runs: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for run in runs:
+        metadata = dict(run.get("run_metadata", {}) or {})
+        strategy = str(metadata.get("benchmark_strategy", "") or "ad_hoc")
+        grouped.setdefault(strategy, []).append(run)
+
+    rows = []
+    for strategy, items in grouped.items():
+        scores = [float(item.get("best_score", 0.0) or 0.0) for item in items]
+        costs = [float(item.get("total_cost_usd", 0.0) or 0.0) for item in items]
+        rows.append(
+            {
+                "strategy": strategy,
+                "runs": len(items),
+                "avg_score": round(mean(scores), 2) if scores else 0.0,
+                "avg_cost": round(mean(costs), 4) if costs else 0.0,
+            }
+        )
+    return sorted(rows, key=lambda item: (-item["runs"], item["strategy"]))
 
 
 def model_comparison_rows(runs: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -233,6 +317,52 @@ def model_comparison_rows(runs: list[dict]) -> tuple[list[dict], list[dict]]:
         sorted(architect_rows, key=lambda item: item["avg_score"], reverse=True),
         sorted(latency_rows, key=lambda item: item["avg_latency_ms"]),
     )
+
+
+def count_eval_fixtures() -> int:
+    fixtures_dir = Path(__file__).resolve().parents[2] / "evals" / "fixtures"
+    total = 0
+    for path in fixtures_dir.glob("*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                total += sum(1 for line in handle if line.strip())
+        except Exception:
+            continue
+    return total
+
+
+def provider_catalog_rows(registry) -> list[dict]:
+    providers = sorted(
+        {
+            plugin.provider
+            for model_id in registry.all_model_ids()
+            for plugin in [registry.get(model_id)]
+            if plugin is not None
+        }
+    )
+    rows = []
+    for provider in providers:
+        state = dict(registry.provider_state(provider) or {})
+        models = list(state.get("models", []) or [])
+        available_count = 0
+        total_count = 0
+        for model_id in registry.all_model_ids():
+            plugin = registry.get(model_id)
+            if plugin is None or plugin.provider != provider:
+                continue
+            total_count += 1
+            if registry.is_model_available(model_id):
+                available_count += 1
+        rows.append(
+            {
+                "provider": provider,
+                "catalog_status": str(state.get("status", "static") or "static"),
+                "catalog_models": len(models),
+                "registry_models": total_count,
+                "available_models": available_count,
+            }
+        )
+    return rows
 
 
 def render_plotly_or_table(title: str, rows: list[dict], x: str, y: str, chart_type: str = "bar") -> None:
@@ -301,6 +431,30 @@ with overview_tab:
             ("Tracked Tokens", f"{total_tokens:,}"),
         ]
     )
+    summary_cards(
+        [
+            ("Verified Rate", f"{benchmark_stats.get('verified_rate', 0.0)}%"),
+            ("Avg Iterations", benchmark_stats.get("avg_iterations", 0.0)),
+            ("Benchmark Runs", benchmark_stats.get("benchmark_runs", 0)),
+            ("Memory Entries", memory_stats.get("count", 0)),
+        ]
+    )
+
+    left, right = st.columns(2)
+    with left:
+        render_plotly_or_table(
+            "Readiness Breakdown",
+            breakdown_rows(runs, "ship_readiness", default="UNASSESSED"),
+            x="label",
+            y="count",
+        )
+    with right:
+        render_plotly_or_table(
+            "Verification Breakdown",
+            breakdown_rows(runs, "verification_status", default="UNVERIFIED"),
+            x="label",
+            y="count",
+        )
 
     st.markdown("#### Last 5 Runs")
     recent = list(reversed(runs[-5:])) if runs else []
@@ -329,12 +483,32 @@ with explorer_tab:
     if not runs:
         st.caption("No run history available yet.")
     else:
-        mode_filter = st.selectbox(
-            "Filter by task mode",
+        filter_cols = st.columns([1.2, 1, 1, 1.4])
+        mode_filter = filter_cols[0].selectbox(
+            "Task mode",
             ["All"] + sorted({str(run.get("task_mode", "Unknown") or "Unknown") for run in runs}),
             index=0,
         )
-        filtered_runs = [run for run in runs if mode_filter == "All" or run.get("task_mode") == mode_filter]
+        readiness_filter = filter_cols[1].selectbox(
+            "Readiness",
+            ["All"] + sorted({str(run.get("ship_readiness", "UNASSESSED") or "UNASSESSED") for run in runs}),
+            index=0,
+        )
+        verification_filter = filter_cols[2].selectbox(
+            "Verification",
+            ["All"] + sorted({str(run.get("verification_status", "UNVERIFIED") or "UNVERIFIED") for run in runs}),
+            index=0,
+        )
+        search_text = filter_cols[3].text_input("Search runs", placeholder="Run ID, task mode, benchmark title...")
+
+        filtered_runs = filter_runs(
+            runs,
+            mode_filter=mode_filter,
+            readiness_filter=readiness_filter,
+            verification_filter=verification_filter,
+            search_text=search_text,
+        )
+        st.caption(f"{len(filtered_runs)} runs match the current filters.")
         st.dataframe(
             [
                 {
@@ -346,6 +520,7 @@ with explorer_tab:
                     "total_cost_usd": round(float(run.get("total_cost_usd", 0.0) or 0.0), 4),
                     "ship_readiness": run.get("ship_readiness", ""),
                     "verification_status": run.get("verification_status", ""),
+                    "stop_reason": run.get("stop_reason", ""),
                 }
                 for run in filtered_runs
             ],
@@ -368,9 +543,29 @@ with explorer_tab:
                     ("Cost", f"${float(selected_run.get('total_cost_usd', 0.0) or 0.0):.4f}"),
                 ]
             )
+            summary_cards(
+                [
+                    ("Iterations", selected_run.get("iteration_count", 0)),
+                    ("Stop Reason", selected_run.get("stop_reason", "") or "n/a"),
+                    ("Validity", selected_run.get("validity_status", "") or "unknown"),
+                    ("Source", runs_source.upper()),
+                ]
+            )
+            metadata = dict(selected_run.get("run_metadata", {}) or {})
+            with st.expander("Input and Metadata", expanded=False):
+                st.markdown("**Input**")
+                user_input = truncate_text(selected_run.get("user_input", "") or metadata.get("task", ""), limit=600)
+                st.write(user_input or "Full user input was not stored for this run source.")
+                if metadata:
+                    st.markdown("**Run Metadata**")
+                    st.json(metadata)
             with st.expander("Solution", expanded=False):
                 solution = str(selected_run.get("best_solution", "") or "").strip()
                 st.write(solution or "Detailed solution text is only available when persistence is enabled for full runs.")
+            model_usage = list(metadata.get("model_usage", []) or [])
+            if model_usage:
+                st.markdown("#### Model Usage")
+                st.dataframe(model_usage, use_container_width=True, hide_index=True)
             iterations = load_run_iterations(selected_run.get("id", ""))
             if iterations:
                 st.markdown("#### Iteration Breakdown")
@@ -400,6 +595,19 @@ with analytics_tab:
         y="avg_score",
     )
     render_plotly_or_table("Cost vs Quality", trend_rows, x="total_cost_usd", y="best_score", chart_type="scatter")
+    render_plotly_or_table(
+        "Iteration Count by Task Mode",
+        [
+            {"task_mode": row["task_mode"], "avg_iterations": round(mean(
+                float(run.get("iteration_count", 0) or 0)
+                for run in runs
+                if str(run.get("task_mode", "Unknown") or "Unknown") == row["task_mode"]
+            ), 2)}
+            for row in benchmark_stats_table(runs)
+        ],
+        x="task_mode",
+        y="avg_iterations",
+    )
 
     architect_rows, latency_rows = model_comparison_rows(runs)
     left, right = st.columns(2)
@@ -430,6 +638,13 @@ with benchmarks_tab:
         st.dataframe(stats_rows, use_container_width=True, hide_index=True)
     else:
         st.caption("No benchmark history is available yet.")
+
+    strategy_rows = benchmark_strategy_rows(runs)
+    st.markdown("#### Strategy Comparison")
+    if strategy_rows:
+        st.dataframe(strategy_rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No benchmark strategy labels are available yet.")
 
     readiness_breakdown = {}
     for run in runs:
@@ -465,16 +680,30 @@ with benchmarks_tab:
 with system_tab:
     summary_cards(
         [
+            ("Version", __version__),
             ("SQLAlchemy", "READY" if sqlalchemy_available() else "MISSING"),
             ("Database Enabled", "YES" if database_enabled() else "NO"),
-            ("Memory Entries", memory_stats.get("count", 0)),
-            ("Benchmark Runs", benchmark_stats.get("count", 0)),
+            ("Memory Backend", memory_stats.get("backend", "native")),
+            ("Eval Fixtures", count_eval_fixtures()),
         ]
     )
+    provider_rows = provider_catalog_rows(registry)
+    if provider_rows:
+        st.markdown("#### Provider Catalog Status")
+        st.dataframe(provider_rows, use_container_width=True, hide_index=True)
+
+    alias_rows = [
+        {"alias": alias, "resolved_model": target or "unresolved"}
+        for alias, target in sorted(registry.aliases().items())
+    ]
+    if alias_rows:
+        st.markdown("#### Stable Alias Resolution")
+        st.dataframe(alias_rows, use_container_width=True, hide_index=True)
     st.markdown("#### System Notes")
     st.markdown(
         "- The dashboard reads from the database first when DB persistence is enabled.\n"
         "- When DB dependencies are missing, it falls back to the current benchmark store.\n"
         "- Detailed iteration drill-down and model usage are richest when database persistence is active.\n"
-        "- The main Streamlit product UI is unchanged; this page is intentionally separate."
+        "- The main Streamlit product UI is unchanged; this page is intentionally separate.\n"
+        "- Optional features remain degradable by design, so this surface reflects what is actually available in the current install."
     )

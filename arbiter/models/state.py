@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 
@@ -224,52 +224,9 @@ class ArbiterState:
         )
 
     def add_iteration(self, record: IterationRecord):
-        self.iteration_history.append({
-            "iter":           record.iter,
-            "tech":           record.tech,
-            "logic":          record.logic,
-            "avg":            record.avg,
-            "raw_avg_score":  getattr(record, "raw_avg_score", record.avg),
-            "solution":       record.solution,
-            "validity_status": getattr(record, "validity_status", "VALID"),
-            "score_status": getattr(record, "score_status", "final"),
-            "review_confidence": getattr(record, "review_confidence", "normal"),
-            "verification_status": getattr(record, "verification_status", "UNVERIFIED"),
-            "verification_score": getattr(record, "verification_score", 0.0),
-            "verification_summary": getattr(record, "verification_summary", ""),
-            "verification_checks": getattr(record, "verification_checks", []),
-            "ship_readiness": getattr(record, "ship_readiness", "UNASSESSED"),
-            "critic_overlap": getattr(record, "critic_overlap", 0.0),
-            "critic_redundancy": getattr(record, "critic_redundancy", False),
-            "tech_confirmed_defects": getattr(record, "tech_confirmed_defects", []),
-            "tech_risks": getattr(record, "tech_risks", []),
-            "tech_improvements": getattr(record, "tech_improvements", []),
-            "logic_confirmed_defects": getattr(record, "logic_confirmed_defects", []),
-            "logic_risks": getattr(record, "logic_risks", []),
-            "logic_improvements": getattr(record, "logic_improvements", []),
-            "memory_status": getattr(record, "memory_status", "ACCEPT"),
-            "memory_consensus_score": getattr(record, "memory_consensus_score", 0.0),
-            "memory_reasons": getattr(record, "memory_reasons", []),
-            "related_memory_ids": getattr(record, "related_memory_ids", []),
-            "tech_critique":  record.tech_critique,
-            "logic_critique": record.logic_critique,
-            "fix":            record.fix,
-            "tech_issues": getattr(record, "tech_issues", []),
-            "logic_issues": getattr(record, "logic_issues", []),
-            "tech_repair_contract": getattr(record, "tech_repair_contract", []),
-            "logic_repair_contract": getattr(record, "logic_repair_contract", []),
-            "janitor_summary": getattr(record, "janitor_summary", ""),
-            "janitor_primary_subsystem": getattr(record, "janitor_primary_subsystem", ""),
-            "janitor_resolved": getattr(record, "janitor_resolved", []),
-            "janitor_pending": getattr(record, "janitor_pending", []),
-            "janitor_regressed": getattr(record, "janitor_regressed", []),
-            "janitor_preserve": getattr(record, "janitor_preserve", []),
-            "janitor_repair_brief": getattr(record, "janitor_repair_brief", []),
-            "preflight_issues": record.preflight_issues,
-            "architect_model": record.architect_model,
-            "tech_model": record.tech_model,
-            "logic_model": record.logic_model,
-        })
+        entry = asdict(record)
+        entry["raw_avg_score"] = float(entry.get("raw_avg_score") or entry.get("avg", 0.0) or 0.0)
+        self.iteration_history.append(entry)
         self._update_issue_tracking(record)
         self._update_adaptive_signals(record)
         self.iteration_history[-1]["pending_tech_issues"] = list(self.unresolved_issues["tech"])

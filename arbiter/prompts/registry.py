@@ -238,7 +238,7 @@ TECHNICAL DEFECT SUMMARY:
 {latest["tech_critique"]}
 
 TECHNICAL ISSUE SET:
-- """ + "\n- ".join(tech_issues) + f"""
+- """ + "\n- ".join(tech_issues) + """
 
 REPAIR CONTRACT:
 - """ + "\n- ".join(item for item in tech_contract if item) + """
@@ -259,7 +259,7 @@ LOGIC GAP:
 {latest["logic_critique"]}
 
 LOGIC ISSUE SET:
-- """ + "\n- ".join(logic_issues) + f"""
+- """ + "\n- ".join(logic_issues) + """
 
 REPAIR CONTRACT:
 - """ + "\n- ".join(item for item in logic_contract if item) + """

@@ -1,3 +1,4 @@
+import atexit
 import json
 import math
 import re
@@ -74,14 +75,18 @@ class MemoryStore:
     def __init__(self):
         MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         self._entries: List[Dict] = []
+        self._entries_by_task_mode: Dict[str, List[Dict]] = {}
+        self._entries_by_id: Dict[str, Dict] = {}
         self._project_notes: List[Dict] = []
         self._embedding = LocalHashEmbeddingFunction()
         self._backend = "native"
         self._chroma_client = None
         self._collection = None
+        self._dirty_entries = False
         self._load_entries()
         self._load_project_notes()
         self._init_chroma()
+        atexit.register(self.flush)
 
     @staticmethod
     def _ensure_storage_paths():
@@ -119,6 +124,7 @@ class MemoryStore:
                     continue
                 loaded.append(entry)
         self._entries = loaded[-500:]
+        self._rebuild_indexes()
 
     def _load_project_notes(self):
         self._ensure_storage_paths()
@@ -144,6 +150,47 @@ class MemoryStore:
         with JSONL_PATH.open("w", encoding="utf-8") as handle:
             for entry in self._entries[-500:]:
                 handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
+        self._dirty_entries = False
+
+    def flush(self) -> bool:
+        if not self._dirty_entries:
+            return False
+        self._persist_entries()
+        return True
+
+    def _rebuild_indexes(self):
+        self._entries_by_task_mode = {}
+        self._entries_by_id = {}
+        for entry in self._entries:
+            task_mode = str(entry.get("task_mode", "") or "")
+            self._entries_by_task_mode.setdefault(task_mode, []).append(entry)
+            memory_id = entry.get("memory_id")
+            if memory_id:
+                self._entries_by_id[memory_id] = entry
+
+    def _register_entry(self, entry: Dict):
+        task_mode = str(entry.get("task_mode", "") or "")
+        self._entries_by_task_mode.setdefault(task_mode, []).append(entry)
+        memory_id = entry.get("memory_id")
+        if memory_id:
+            self._entries_by_id[memory_id] = entry
+
+    def _trim_entries(self):
+        if len(self._entries) <= 500:
+            return
+        self._entries = self._entries[-500:]
+        self._rebuild_indexes()
+        self._dirty_entries = True
+
+    def _mark_entries_dirty(self):
+        self._dirty_entries = True
+
+    def _mode_entries(self, task_mode: str) -> List[Dict]:
+        task_mode = str(task_mode or "")
+        entries = self._entries_by_task_mode.get(task_mode, [])
+        if entries:
+            return list(entries)
+        return list(self._entries)
 
     def _persist_project_notes(self):
         self._ensure_storage_paths()
@@ -270,14 +317,12 @@ class MemoryStore:
         lifecycle = str(lifecycle or "").strip().lower()
         if lifecycle not in self.LIFECYCLE_PRIORITY:
             return False
-        updated = False
-        for entry in self._entries:
-            if entry.get("memory_id") == memory_id:
-                entry["memory_lifecycle"] = lifecycle
-                updated = True
-                break
+        entry = self._entries_by_id.get(memory_id)
+        updated = bool(entry)
+        if entry is not None:
+            entry["memory_lifecycle"] = lifecycle
         if updated:
-            self._persist_entries()
+            self._mark_entries_dirty()
         return updated
 
     def set_project_note_active(self, note_id: str, active: bool) -> bool:
@@ -320,7 +365,7 @@ class MemoryStore:
         )
 
         updated = False
-        for existing in self._entries:
+        for existing in self._mode_entries(entry.get("task_mode", "")):
             if existing.get("memory_id") == entry.get("memory_id"):
                 continue
             if existing.get("memory_lifecycle") == "obsolete":
@@ -345,13 +390,13 @@ class MemoryStore:
                 existing["superseded_at"] = entry.get("timestamp_utc")
                 updated = True
             elif existing_is_strong and entry.get("memory_lifecycle") == "conflicted":
-                existing.setdefault("conflicted_by", [])
-                if entry.get("memory_id") not in existing["conflicted_by"]:
-                    existing["conflicted_by"].append(entry.get("memory_id"))
-                    updated = True
+                    existing.setdefault("conflicted_by", [])
+                    if entry.get("memory_id") not in existing["conflicted_by"]:
+                        existing["conflicted_by"].append(entry.get("memory_id"))
+                        updated = True
 
         if updated:
-            self._persist_entries()
+            self._mark_entries_dirty()
 
     def evaluate_candidate(
         self,
@@ -524,7 +569,8 @@ class MemoryStore:
         if verdict["status"] == "REJECT":
             return entry
         self._entries.append(entry)
-        self._entries = self._entries[-500:]
+        self._register_entry(entry)
+        self._trim_entries()
         self._append_entry(entry)
         self._apply_versioning(entry)
         self._store_in_chroma(entry)
@@ -537,7 +583,7 @@ class MemoryStore:
         )
 
         ranked = []
-        for entry in self._entries:
+        for entry in self._mode_entries(task_mode):
             if entry.get("memory_lifecycle", "active") == "obsolete":
                 continue
             entry_task_tokens = set(entry.get("task_tokens", []))
@@ -596,14 +642,13 @@ class MemoryStore:
         if not ids:
             return []
 
-        by_id = {entry.get("memory_id"): entry for entry in self._entries}
         retrieved = []
         seen = set()
         for item_id in ids:
             if item_id in seen:
                 continue
             seen.add(item_id)
-            entry = by_id.get(item_id)
+            entry = self._entries_by_id.get(item_id)
             if entry and entry.get("memory_lifecycle", "active") != "obsolete":
                 retrieved.append(entry)
             if len(retrieved) >= limit:

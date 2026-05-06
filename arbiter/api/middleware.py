@@ -16,6 +16,16 @@ def _cors_origins() -> list[str]:
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
+def _rate_limit_headers() -> dict[str, str]:
+    limit = str(os.getenv("ARBITER_RATE_LIMIT_LIMIT", "0") or "0").strip() or "0"
+    reset = str(os.getenv("ARBITER_RATE_LIMIT_RESET", "60") or "60").strip() or "60"
+    return {
+        "X-RateLimit-Limit": limit,
+        "X-RateLimit-Remaining": limit,
+        "X-RateLimit-Reset": reset,
+    }
+
+
 def install_middleware(app: FastAPI) -> None:
     app.add_middleware(
         CORSMiddleware,
@@ -40,4 +50,6 @@ def install_middleware(app: FastAPI) -> None:
             },
         )
         response.headers["X-Process-Time"] = str(round((time.perf_counter() - started), 4))
+        for header_name, header_value in _rate_limit_headers().items():
+            response.headers[header_name] = header_value
         return response

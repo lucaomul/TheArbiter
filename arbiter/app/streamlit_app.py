@@ -5,6 +5,7 @@ import html
 import json
 import sys
 import os
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -18,14 +19,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from arbiter.core.orchestrator import ArbiterOrchestrator
-from arbiter.models.state import ArbiterState
-from arbiter.config.settings import SETTINGS, TASK_PROFILES, PRICES
+from arbiter.config.settings import TASK_PROFILES
 from arbiter.infra.cache import get_cache
 from arbiter.infra.memory_store import get_memory_store
 from arbiter.infra.benchmark_suite import get_benchmark_packs, get_benchmark_cases, get_case_by_id
 from arbiter.infra.plugin_registry import get_plugin_registry, provider_for_model
 from arbiter.app.ui_styles import UI_CSS
 from arbiter.app.visual_summaries import build_visual_blueprint_html
+
+try:
+    from arbiter import __version__
+except ImportError:
+    try:
+        __version__ = version("the-arbiter")
+    except PackageNotFoundError:
+        __version__ = "0.1.0"
 
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 REGISTRY = get_plugin_registry()
@@ -557,6 +565,52 @@ def render_summary_cards(items):
             "</div>"
         )
     st.markdown("<div class='summary-grid'>" + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
+def count_eval_fixtures() -> int:
+    fixtures_dir = PROJECT_ROOT / "evals" / "fixtures"
+    total = 0
+    for path in fixtures_dir.glob("*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                total += sum(1 for line in handle if line.strip())
+        except Exception:
+            continue
+    return total
+
+
+def provider_catalog_rows() -> list[dict]:
+    providers = sorted(
+        {
+            plugin.provider
+            for model_id in REGISTRY.all_model_ids()
+            for plugin in [REGISTRY.get(model_id)]
+            if plugin is not None
+        }
+    )
+    rows = []
+    for provider in providers:
+        state = dict(REGISTRY.provider_state(provider) or {})
+        models = list(state.get("models", []) or [])
+        total_count = 0
+        available_count = 0
+        for model_id in REGISTRY.all_model_ids():
+            plugin = REGISTRY.get(model_id)
+            if plugin is None or plugin.provider != provider:
+                continue
+            total_count += 1
+            if REGISTRY.is_model_available(model_id):
+                available_count += 1
+        rows.append(
+            {
+                "provider": provider,
+                "catalog_status": str(state.get("status", "static") or "static"),
+                "catalog_models": len(models),
+                "registry_models": total_count,
+                "available_models": available_count,
+            }
+        )
+    return rows
 
 
 def render_case_flow_panel():
@@ -1145,13 +1199,17 @@ def get_runtime_health_snapshot() -> dict:
     memory_store = get_memory_store()
     issues = []
     checks = {
+        "version": __version__,
         "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "memory_entries_ready": (PROJECT_ROOT / ".arbiter_memory" / "memory_entries.jsonl").exists(),
         "project_notes_ready": (PROJECT_ROOT / ".arbiter_memory" / "project_notes.json").exists(),
         "project_notes_api": hasattr(memory_store, "retrieve_project_notes") and hasattr(memory_store, "add_project_note"),
         "memory_governance_api": hasattr(memory_store, "recent_entries") and hasattr(memory_store, "set_memory_lifecycle"),
+        "memory_flush_api": hasattr(memory_store, "flush"),
         "decision_trace_ready": isinstance(st.session_state.decision_trace, list),
         "benchmark_suite_ready": bool(get_benchmark_packs()),
+        "eval_fixtures": count_eval_fixtures(),
+        "model_catalog_count": len(REGISTRY.all_model_ids()),
     }
     if not checks["memory_entries_ready"]:
         issues.append("Persistent memory file is missing.")
@@ -1163,6 +1221,8 @@ def get_runtime_health_snapshot() -> dict:
         issues.append("Memory governance controls are not fully loaded. A full restart may be needed.")
     if not checks["benchmark_suite_ready"]:
         issues.append("Benchmark suite could not load any benchmark scenarios.")
+    if not checks["memory_flush_api"]:
+        issues.append("Memory flush controls are not fully loaded. A full restart may be needed.")
     overall = "HEALTHY" if not issues else "ATTENTION"
     return {"overall": overall, "checks": checks, "issues": issues}
 
@@ -1172,7 +1232,7 @@ def render_health_and_decisions():
     st.markdown("#### System Health")
     top = st.columns(4)
     top[0].metric("Runtime", snapshot["overall"])
-    top[1].metric("Python", snapshot["checks"]["python"])
+    top[1].metric("Version", snapshot["checks"]["version"])
     top[2].metric(
         "Memory",
         "READY" if snapshot["checks"]["memory_entries_ready"] and snapshot["checks"]["project_notes_ready"] else "CHECK",
@@ -1182,11 +1242,30 @@ def render_health_and_decisions():
         "READY" if snapshot["checks"]["memory_governance_api"] else "RESTART",
     )
 
+    infra = st.columns(4)
+    infra[0].metric("Python", snapshot["checks"]["python"])
+    infra[1].metric("Eval Fixtures", snapshot["checks"]["eval_fixtures"])
+    infra[2].metric("Model Catalog", snapshot["checks"]["model_catalog_count"])
+    infra[3].metric("Flush API", "READY" if snapshot["checks"]["memory_flush_api"] else "RESTART")
+
     providers = st.columns(4)
     providers[0].metric("Groq", "YES" if os.getenv("GROQ_API_KEY") else "NO")
     providers[1].metric("OpenAI", "YES" if os.getenv("OPENAI_API_KEY") else "NO")
     providers[2].metric("Gemini", "YES" if os.getenv("GEMINI_API_KEY") else "NO")
     providers[3].metric("Claude", "YES" if os.getenv("ANTHROPIC_API_KEY") else "NO")
+
+    provider_rows = provider_catalog_rows()
+    if provider_rows:
+        st.markdown("#### Provider Catalog Status")
+        st.dataframe(provider_rows, use_container_width=True, hide_index=True)
+
+    alias_rows = [
+        {"alias": alias, "resolved_model": target or "unresolved"}
+        for alias, target in sorted(REGISTRY.aliases().items())
+    ]
+    if alias_rows:
+        st.markdown("#### Stable Alias Resolution")
+        st.dataframe(alias_rows, use_container_width=True, hide_index=True)
 
     if snapshot["issues"]:
         st.warning("Runtime health needs attention.")
@@ -1295,15 +1374,60 @@ def render_benchmark_panel():
 
 def render_memory_governance():
     memory_store = get_memory_store()
-    lifecycle_filter = st.selectbox(
+    control_cols = st.columns([1.2, 1.8, 1.2])
+    lifecycle_filter = control_cols[0].selectbox(
         "Memory Lifecycle Filter",
         ["all", "active", "caution", "conflicted", "obsolete"],
         index=0,
         key="memory_governance_filter",
     )
+    memory_search = control_cols[1].text_input(
+        "Search memory / notes",
+        placeholder="Task text, note text, memory ID...",
+        key="memory_governance_search",
+    )
+    if control_cols[2].button("Flush Store", key="flush_governance_store"):
+        if hasattr(memory_store, "flush"):
+            flushed = bool(memory_store.flush())
+            st.session_state.memory_stats = memory_store.stats()
+            if flushed:
+                st.success("Memory store flushed to disk.")
+            else:
+                st.caption("No pending memory changes needed flushing.")
+        else:
+            st.warning("Flush control is not available in this runtime.")
 
     entries = memory_store.recent_entries(limit=20, include_obsolete=True) if hasattr(memory_store, "recent_entries") else []
     notes = memory_store.project_notes() if hasattr(memory_store, "project_notes") else []
+    query = str(memory_search or "").strip().lower()
+    if query:
+        entries = [
+            entry for entry in entries
+            if query in " ".join(
+                [
+                    str(entry.get("memory_id", "")),
+                    str(entry.get("task_mode", "")),
+                    str(entry.get("task_text", "")),
+                ]
+            ).lower()
+        ]
+        notes = [
+            note for note in notes
+            if query in " ".join(
+                [
+                    str(note.get("note_id", "")),
+                    str(note.get("task_mode", "")),
+                    str(note.get("text", "")),
+                ]
+            ).lower()
+        ]
+
+    summary = st.columns(4)
+    lifecycle_stats = st.session_state.memory_stats.get("memory_lifecycle", {}) or {}
+    summary[0].metric("Visible Entries", len(entries))
+    summary[1].metric("Visible Notes", len(notes))
+    summary[2].metric("Active", int(lifecycle_stats.get("active", 0) or 0))
+    summary[3].metric("Conflicted", int(lifecycle_stats.get("conflicted", 0) or 0))
 
     entry_tab, note_tab = st.tabs(["Memory Entries", "Project Notes"])
 
@@ -1461,7 +1585,9 @@ def render_telemetry_panel():
     latest = st.session_state.iteration_history[-1]
     best = st.session_state.best_iteration
     weights = TASK_PROFILES[st.session_state.task_mode].get("score_weights", {"tech": 0.5, "logic": 0.5})
-    current_label = "Diagnostic Avg" if latest.get("score_status") == "diagnostic" else "Current Avg"
+    raw_avg_score = float(latest.get("raw_avg_score", latest.get("avg", 0.0)) or 0.0)
+    final_score = float(latest.get("avg", 0.0) or 0.0)
+    current_label = "Diagnostic Final" if latest.get("score_status") == "diagnostic" else "Current Final"
     current_meta_prefix = "Diagnostic only" if latest.get("score_status") == "diagnostic" else "Current review"
     if best:
         best_value = f"Round {best['iter']}"
@@ -1472,7 +1598,8 @@ def render_telemetry_panel():
     render_summary_cards(
         [
             ("Task Mode", st.session_state.task_mode),
-            (current_label, f"{latest['avg']:.1f}/10"),
+            (current_label, f"{final_score:.1f}/10"),
+            ("Critic Avg", f"{raw_avg_score:.1f}/10"),
             ("Best Round", best_value),
             ("Adaptive State", "Stable" if st.session_state.stable_mode else ("Rewrite" if st.session_state.rewrite_mode else "Refine")),
             ("Memory", f"{st.session_state.memory_stats.get('count', 0)} entries"),
@@ -1488,6 +1615,8 @@ def render_telemetry_panel():
         f"{best_meta} · Provider {st.session_state.provider_lock.upper()} · "
         f"Preflight {st.session_state.preflight_events} · Repairs {st.session_state.repair_events}"
     )
+    if abs(final_score - raw_avg_score) > 0.01:
+        st.caption(f"Verification pressure changed the round from {raw_avg_score:.1f}/10 to {final_score:.1f}/10.")
 
 
 def render_memory_panel():
@@ -1519,6 +1648,22 @@ def render_memory_panel():
         top[5].metric("Project Notes", project_notes_count)
         if obsolete_count:
             st.caption(f"Obsolete memories archived from active retrieval: {obsolete_count}")
+
+        controls = st.columns([1.2, 1.2, 3])
+        if controls[0].button("Flush Memory Store", key="flush_memory_store"):
+            if hasattr(get_memory_store(), "flush"):
+                flushed = bool(get_memory_store().flush())
+                st.session_state.memory_stats = get_memory_store().stats()
+                if flushed:
+                    st.success("Memory store flushed to disk.")
+                else:
+                    st.caption("No pending memory changes needed flushing.")
+            else:
+                st.warning("Flush control is not available in this runtime.")
+        controls[1].metric("Retrieved IDs", len(related_memory_ids))
+        controls[2].caption(
+            "Session writes append new entries immediately. Flush rewrites lifecycle/versioning updates into the durable store when needed."
+        )
 
         if memory_reasons:
             st.markdown("**Current Memory Trust Notes**")
@@ -1566,7 +1711,6 @@ def render_review_panel():
     }
     memory_status = latest.get("memory_status", "ACCEPT")
     memory_consensus = float(latest.get("memory_consensus_score", 0.0) or 0.0)
-    memory_reasons = latest.get("memory_reasons", []) or []
     verification_status = str(latest.get("verification_status", "UNVERIFIED")).upper()
     verification_score = float(latest.get("verification_score", 0.0) or 0.0)
     verification_summary = str(latest.get("verification_summary", "") or "").strip()
@@ -1598,15 +1742,29 @@ def render_review_panel():
         else:
             st.caption(empty_text)
 
+    def verification_ui_message(status: str, score: float, summary: str) -> tuple[str, str]:
+        clean_summary = str(summary or "").strip()
+        if str(status or "").upper() == "BLOCKED":
+            return (
+                "warning",
+                clean_summary
+                or "Verification was blocked by a provider or process failure. This does not confirm the content is wrong; it means the review chain could not finish cleanly.",
+            )
+        if clean_summary:
+            return ("info", f"Verification {score:.2f} · {clean_summary}")
+        return ("info", "")
+
     with st.container(border=True):
         st.subheader("The Arbiter Order")
+        score_delta = calibrated_score - raw_avg_score
         render_summary_cards(
             [
                 ("Status", validity_status),
                 ("Technical Score", f"{latest['tech']}/10"),
                 ("Logic Score", f"{latest['logic']}/10"),
                 ("Critic Average", f"{raw_avg_score:.1f}/10"),
-                ("Calibrated Score", f"{calibrated_score:.1f}/10"),
+                ("Final Verified Score", f"{calibrated_score:.1f}/10"),
+                ("Verification Pressure", f"{score_delta:+.1f}"),
                 ("Confidence", review_confidence.upper()),
                 ("Verification", verification_status),
                 ("Readiness", ship_readiness),
@@ -1627,7 +1785,7 @@ def render_review_panel():
                     <span class="arbiter-help-bubble">
                         <b>Critic Average</b> is the raw score from the technical and logic critics.
                         <br><br>
-                        <b>Calibrated Score</b> is the final round score after deterministic verification
+                        <b>Final Verified Score</b> is the final round score after deterministic verification
                         adjusts that critic average up or down based on caution points, confirmed defects,
                         and structural validation.
                     </span>
@@ -1636,8 +1794,16 @@ def render_review_panel():
             """,
             unsafe_allow_html=True,
         )
-        if verification_summary:
-            st.info(f"Verification {verification_score:.2f} · {verification_summary}")
+        message_kind, message_text = verification_ui_message(
+            verification_status,
+            verification_score,
+            verification_summary,
+        )
+        if message_text:
+            if message_kind == "warning":
+                st.warning(message_text)
+            else:
+                st.info(message_text)
 
         if latest.get("preflight_issues"):
             st.error("Preflight Findings")
@@ -1666,6 +1832,8 @@ def render_review_panel():
                     ("Consensus", f"{memory_consensus:.2f}"),
                     ("Retry Source", "Janitor"),
                     ("Verifier Score", f"{verification_score:.2f}"),
+                    ("Tech Defects", len(tech_confirmed)),
+                    ("Logic Defects", len(logic_confirmed)),
                 ]
             )
 

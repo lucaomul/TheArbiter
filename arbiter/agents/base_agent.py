@@ -1,6 +1,8 @@
 import json
 import re
-from arbiter.infra.llm_client import get_llm_client
+from typing import Optional
+
+from arbiter.infra.llm_client import LLMResult, get_llm_client
 from arbiter.infra.cache import get_cache
 from arbiter.infra.model_selector import provider_for_model
 
@@ -19,6 +21,7 @@ class BaseAgent:
         self._client       = get_llm_client()
         self._cache        = get_cache()
         self._last_call_metadata = {}
+        self._last_result = None
 
     def run(self, user_prompt: str, history: str = "", force_json: bool = False) -> str:
         full_prompt = (
@@ -44,9 +47,17 @@ class BaseAgent:
             )
             self._client._set_last_call_metadata(metadata)
             self._last_call_metadata = self._client.get_last_call_metadata()
+            self._last_result = LLMResult(
+                success=True,
+                text=cached,
+                error_type=None,
+                provider=self.provider,
+                model=self.model,
+                retry_after_seconds=None,
+            )
             return cached
 
-        response = self._client.generate(
+        response_result = self._client.generate_result(
             provider=self.provider,
             model=self.model,
             system_prompt=self.system_prompt,
@@ -56,13 +67,19 @@ class BaseAgent:
             agent_name=self.name,
         )
         self._last_call_metadata = self._client.get_last_call_metadata()
+        self._last_result = response_result
 
-        if self.is_cacheable_response(response):
-            self._cache.set(self.provider, self.model, full_prompt, response)
-        return response
+        if self.is_cacheable_response(response_result.text, llm_result=response_result):
+            self._cache.set(self.provider, self.model, full_prompt, response_result.text)
+        return response_result.text
 
     def last_call_metadata(self) -> dict:
         return dict(self._last_call_metadata or {})
+
+    def last_result(self) -> Optional[LLMResult]:
+        if self._last_result is None:
+            return None
+        return LLMResult(**self._last_result.__dict__)
 
     @staticmethod
     def extract_task_mode(task_text: str) -> str:
@@ -134,7 +151,9 @@ class BaseAgent:
         return code_like_count >= max(4, len(non_empty_lines) // 3)
 
     @staticmethod
-    def is_cacheable_response(response: str) -> bool:
+    def is_cacheable_response(response: str, llm_result: LLMResult = None) -> bool:
+        if llm_result is not None and not llm_result.success:
+            return False
         raw = str(response or "").strip()
         if not raw.startswith("{"):
             return True
@@ -151,7 +170,10 @@ class BaseAgent:
         return True
 
     @staticmethod
-    def error_payload(raw: str):
+    def error_payload(raw: str, llm_result: LLMResult = None):
+        if llm_result is not None and not llm_result.success:
+            parsed = BaseAgent.clean_json(llm_result.text)
+            return parsed if isinstance(parsed, dict) else None
         text = str(raw or "").strip()
         if not text.startswith("{"):
             return None

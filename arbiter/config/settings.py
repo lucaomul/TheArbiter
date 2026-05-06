@@ -13,6 +13,7 @@ class Settings:
 
     # Model defaults
     architect_model: str = "llama-3.3-70b-versatile"
+    architect_model_quality: str = "alias:openai_primary"
     architect_model_cheap: str = "llama-3.1-8b-instant"
     tech_critic_model: str = "llama-3.3-70b-versatile"
     logic_critic_model: str = "llama-3.3-70b-versatile"
@@ -34,6 +35,7 @@ class Settings:
     final_validation_enabled: bool = True
     parallel_critics: bool = True
     critic_timeout_seconds: int = 45
+    critic_redundancy_score_band_check: bool = True
 
     # Provider resilience
     rate_limit_cooldown_seconds: int = 45 * 60

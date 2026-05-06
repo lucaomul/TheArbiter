@@ -3,7 +3,9 @@ import json
 import re
 import time
 import threading
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 from urllib import error, request
 
 try:
@@ -25,6 +27,16 @@ load_dotenv(PROJECT_ROOT / ".env")
 logger = get_logger(__name__)
 
 
+@dataclass
+class LLMResult:
+    success: bool
+    text: str
+    error_type: Optional[str]
+    provider: str
+    model: str
+    retry_after_seconds: Optional[int] = None
+
+
 class LLMClient:
     """
     Unified interface for calling multiple LLM providers.
@@ -37,6 +49,7 @@ class LLMClient:
         self._ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self._last_call_metadata = {}
         self._metadata_lock = threading.RLock()
+        self._last_result = None
         self._session_stats = {
             "total_tokens": 0,
             "total_cost_usd": 0.0,
@@ -66,6 +79,7 @@ class LLMClient:
         critique_prefix: str,
         fix_suggestion: str,
         error_type: str = "provider_error",
+        retry_after_seconds: int = None,
     ) -> str:
         payload = {
             "error": message,
@@ -77,7 +91,7 @@ class LLMClient:
             "model": model,
             "error_type": error_type,
         }
-        retry_after_seconds = self._extract_retry_after_seconds(message)
+        retry_after_seconds = retry_after_seconds or self._extract_retry_after_seconds(message)
         if retry_after_seconds is not None:
             payload["retry_after_seconds"] = retry_after_seconds
         return json.dumps(payload)
@@ -152,6 +166,12 @@ class LLMClient:
         with self._metadata_lock:
             return dict(self._last_call_metadata or {})
 
+    def get_last_result(self) -> Optional[LLMResult]:
+        with self._metadata_lock:
+            if self._last_result is None:
+                return None
+            return LLMResult(**self._last_result.__dict__)
+
     def _record_session_call(self, metadata: dict):
         if not metadata:
             return
@@ -208,6 +228,82 @@ class LLMClient:
         return None
 
     @staticmethod
+    def _response_error_payload(response: str) -> Optional[dict]:
+        text = str(response or "").strip()
+        if not text.startswith("{"):
+            return None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return None
+        if payload.get("provider_error") or payload.get("error_type"):
+            return payload
+        return None
+
+    @staticmethod
+    def _infer_error_type(message: str) -> str:
+        lowered = str(message or "").lower()
+        if "rate limit" in lowered or "rate_limit" in lowered or "quota" in lowered:
+            return "rate_limit"
+        if "decommissioned" in lowered or "model_decommissioned" in lowered:
+            return "model_decommissioned"
+        if "not found" in lowered and "model" in lowered:
+            return "model_missing"
+        return "provider_error"
+
+    def _result_from_response(self, provider: str, model: str, response: str) -> LLMResult:
+        payload = self._response_error_payload(response)
+        if payload:
+            retry_after_seconds = payload.get("retry_after_seconds")
+            try:
+                retry_after_seconds = int(retry_after_seconds) if retry_after_seconds is not None else None
+            except Exception:
+                retry_after_seconds = None
+            return LLMResult(
+                success=False,
+                text=str(response or ""),
+                error_type=str(payload.get("error_type") or "provider_error"),
+                provider=provider,
+                model=model,
+                retry_after_seconds=retry_after_seconds,
+            )
+        return LLMResult(
+            success=True,
+            text=str(response or ""),
+            error_type=None,
+            provider=provider,
+            model=model,
+            retry_after_seconds=None,
+        )
+
+    def _result_from_exception(
+        self,
+        provider: str,
+        model: str,
+        message: str,
+        critique_prefix: str,
+        fix_suggestion: str,
+    ) -> LLMResult:
+        error_type = self._infer_error_type(message)
+        retry_after_seconds = self._extract_retry_after_seconds(message)
+        return LLMResult(
+            success=False,
+            text=self._error_payload(
+                provider,
+                model,
+                message,
+                critique_prefix,
+                fix_suggestion,
+                error_type=error_type,
+                retry_after_seconds=retry_after_seconds,
+            ),
+            error_type=error_type,
+            provider=provider,
+            model=model,
+            retry_after_seconds=retry_after_seconds,
+        )
+
+    @staticmethod
     def _require_openai_sdk(provider_label: str):
         if OpenAI is None:
             raise RuntimeError(
@@ -231,6 +327,135 @@ class LLMClient:
         return self._groq_client
 
     # ── Main entry point ──────────────────────────────────────
+    def generate_result(
+        self,
+        provider: str,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        force_json: bool = False,
+        temperature: float = 0.7,
+        agent_name: str = "",
+    ) -> LLMResult:
+        self._set_last_call_metadata({})
+        self._last_result = None
+        max_retries = 2
+        attempt = 0
+
+        while True:
+            start_time = time.perf_counter()
+            logger.debug(
+                "llm_call_start",
+                extra={
+                    "provider": provider,
+                    "model": model,
+                    "force_json": force_json,
+                    "agent_name": agent_name,
+                    "attempt": attempt + 1,
+                },
+            )
+            usage = {}
+            try:
+                if provider == "openai":
+                    response, usage = self._call_openai(model, system_prompt, user_prompt, force_json, temperature)
+                elif provider == "groq":
+                    response, usage = self._call_groq(model, system_prompt, user_prompt, temperature)
+                elif provider == "gemini":
+                    response, usage = self._call_gemini(model, system_prompt, user_prompt, temperature)
+                elif provider == "ollama":
+                    response, usage = self._call_ollama(model, system_prompt, user_prompt, temperature)
+                elif provider == "anthropic":
+                    response, usage = self._call_anthropic(model, system_prompt, user_prompt, temperature)
+                else:
+                    raise ValueError(f"Unknown provider: {provider}")
+                result = self._result_from_response(provider, model, response)
+            except Exception as exc:
+                message = str(exc)
+                fix = "Check API key and network."
+                if self._infer_error_type(message) == "rate_limit":
+                    fix = "This model hit a quota or rate limit. Retry later or fall back to a cheaper/local model."
+                result = self._result_from_exception(
+                    provider,
+                    model,
+                    message,
+                    "LLM call failed",
+                    fix,
+                )
+
+            latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            if result.success:
+                metadata = self._build_usage_metadata(
+                    provider=provider,
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    output_text=result.text,
+                    usage=usage,
+                    latency_ms=latency_ms,
+                    cost_method="provider_usage" if usage else "heuristic_tokens",
+                    agent_name=agent_name,
+                )
+                self._set_last_call_metadata(metadata)
+                self._last_result = result
+                logger.debug(
+                    "llm_call_success",
+                    extra={
+                        "provider": provider,
+                        "model": model,
+                        "agent_name": agent_name,
+                        "latency_ms": latency_ms,
+                        "estimated_cost_usd": metadata.get("estimated_cost_usd", 0.0),
+                        "cost_method": metadata.get("cost_method", ""),
+                        "attempt": attempt + 1,
+                    },
+                )
+                return result
+
+            if result.error_type == "rate_limit" and attempt < max_retries:
+                backoff_seconds = max(1, int(result.retry_after_seconds or (2 ** attempt)))
+                logger.warning(
+                    "llm_call_retry_scheduled",
+                    extra={
+                        "provider": provider,
+                        "model": model,
+                        "agent_name": agent_name,
+                        "attempt": attempt + 1,
+                        "backoff_seconds": backoff_seconds,
+                        "error_type": result.error_type,
+                    },
+                )
+                time.sleep(backoff_seconds)
+                attempt += 1
+                continue
+
+            metadata = {
+                "provider": provider,
+                "model": model,
+                "agent_name": agent_name,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost_usd": 0.0,
+                "cost_method": "provider_error",
+                "cached": False,
+                "latency_ms": latency_ms,
+                "error_type": result.error_type or "provider_error",
+            }
+            self._set_last_call_metadata(metadata)
+            self._last_result = result
+            logger.warning(
+                "llm_call_failed",
+                extra={
+                    "provider": provider,
+                    "model": model,
+                    "agent_name": agent_name,
+                    "latency_ms": latency_ms,
+                    "error_type": result.error_type or "provider_error",
+                    "attempt": attempt + 1,
+                },
+            )
+            return result
+
     def generate(
         self,
         provider: str,
@@ -241,118 +466,15 @@ class LLMClient:
         temperature: float = 0.7,
         agent_name: str = "",
     ) -> str:
-        start_time = time.perf_counter()
-        self._set_last_call_metadata({})
-        logger.debug(
-            "llm_call_start",
-            extra={
-                "provider": provider,
-                "model": model,
-                "force_json": force_json,
-                "agent_name": agent_name,
-            },
-        )
-        try:
-            if provider == "openai":
-                response, usage = self._call_openai(model, system_prompt, user_prompt, force_json, temperature)
-            elif provider == "groq":
-                response, usage = self._call_groq(model, system_prompt, user_prompt, temperature)
-            elif provider == "gemini":
-                response, usage = self._call_gemini(model, system_prompt, user_prompt, temperature)
-            elif provider == "ollama":
-                response, usage = self._call_ollama(model, system_prompt, user_prompt, temperature)
-            elif provider == "anthropic":
-                response, usage = self._call_anthropic(model, system_prompt, user_prompt, temperature)
-            else:
-                raise ValueError(f"Unknown provider: {provider}")
-            latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
-            error_type = self._response_error_type(response)
-            if error_type:
-                self._set_last_call_metadata(
-                    {
-                        "provider": provider,
-                        "model": model,
-                        "agent_name": agent_name,
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0,
-                        "estimated_cost_usd": 0.0,
-                        "cost_method": "provider_error",
-                        "cached": False,
-                        "latency_ms": latency_ms,
-                        "error_type": error_type,
-                    }
-                )
-                logger.warning(
-                    "llm_call_failed",
-                    extra={
-                        "provider": provider,
-                        "model": model,
-                        "agent_name": agent_name,
-                        "latency_ms": latency_ms,
-                        "error_type": error_type,
-                    },
-                )
-                return response
-            self._set_last_call_metadata(
-                self._build_usage_metadata(
-                    provider=provider,
-                    model=model,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    output_text=response,
-                    usage=usage,
-                    latency_ms=latency_ms,
-                    cost_method="provider_usage" if usage else "heuristic_tokens",
-                    agent_name=agent_name,
-                )
-            )
-            logger.debug(
-                "llm_call_success",
-                extra={
-                    "provider": provider,
-                    "model": model,
-                    "agent_name": agent_name,
-                    "latency_ms": latency_ms,
-                    "estimated_cost_usd": self._last_call_metadata.get("estimated_cost_usd", 0.0),
-                    "cost_method": self._last_call_metadata.get("cost_method", ""),
-                },
-            )
-            return response
-        except Exception as e:
-            message = str(e)
-            error_type = "provider_error"
-            fix = "Check API key and network."
-            if "rate limit" in message.lower() or "rate_limit" in message.lower():
-                error_type = "rate_limit"
-                fix = "This model hit a quota or rate limit. Retry later or fall back to a cheaper/local model."
-            latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
-            self._set_last_call_metadata(
-                {
-                    "provider": provider,
-                    "model": model,
-                    "agent_name": agent_name,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "estimated_cost_usd": 0.0,
-                    "cost_method": "provider_error",
-                    "cached": False,
-                    "latency_ms": latency_ms,
-                    "error_type": error_type,
-                }
-            )
-            logger.warning(
-                "llm_call_failed",
-                extra={
-                    "provider": provider,
-                    "model": model,
-                    "agent_name": agent_name,
-                    "latency_ms": latency_ms,
-                    "error_type": error_type,
-                },
-            )
-            return self._error_payload(provider, model, message, "LLM call failed", fix, error_type=error_type)
+        return self.generate_result(
+            provider=provider,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            force_json=force_json,
+            temperature=temperature,
+            agent_name=agent_name,
+        ).text
 
     # ── OpenAI ────────────────────────────────────────────────
     def _call_openai(

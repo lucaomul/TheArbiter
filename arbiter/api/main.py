@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -8,6 +10,12 @@ from arbiter.infra.structured_logging import get_logger
 logger = get_logger(__name__)
 
 
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    logger.info("api_ready", extra={"agent_name": "API"})
+    yield
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="The Arbiter API",
@@ -15,6 +23,7 @@ def create_app() -> FastAPI:
         description="Service layer for The Arbiter multi-agent orchestration engine.",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=_lifespan,
     )
     install_middleware(app)
     app.include_router(v1_router)
@@ -37,10 +46,6 @@ def create_app() -> FastAPI:
                 "path": request.url.path,
             },
         )
-
-    @app.on_event("startup")
-    async def announce_startup() -> None:
-        logger.info("api_ready", extra={"agent_name": "API"})
 
     return app
 

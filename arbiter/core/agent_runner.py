@@ -65,8 +65,8 @@ class AgentRunner:
             agent = ArchitectAgent(model=model, system_prompt=prompt)
             solution = agent.generate(task, history=history)
             self._capture_call_metadata("Architect", agent)
-            error_payload = BaseAgent.error_payload(solution)
-            if not error_payload or not error_payload.get("provider_error"):
+            llm_result = agent.last_result()
+            if not llm_result or llm_result.success:
                 logger.info(
                     "architect_completed",
                     extra={
@@ -77,6 +77,7 @@ class AgentRunner:
                     },
                 )
                 return solution, model
+            error_payload = BaseAgent.error_payload(solution, llm_result=llm_result) or {}
             self._handle_provider_error(model, error_payload)
             last_solution = solution
         return last_solution, attempted[-1] if attempted else ""
@@ -198,7 +199,8 @@ class AgentRunner:
         )
         raw = agent.run(user_prompt, force_json=False)
         self._capture_call_metadata("Critic Debate", agent)
-        error_payload = BaseAgent.error_payload(raw)
+        llm_result = agent.last_result()
+        error_payload = BaseAgent.error_payload(raw, llm_result=llm_result)
         if error_payload and error_payload.get("provider_error"):
             self._handle_provider_error("llama-3.1-8b-instant", error_payload)
             return ({

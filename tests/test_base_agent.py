@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from arbiter.agents.base_agent import BaseAgent
+from arbiter.infra.llm_client import LLMResult
 
 
 def test_normalize_does_not_inflate_scores_from_risks():
@@ -36,9 +37,30 @@ def test_error_payload_detects_provider_failure():
 def test_run_uses_cache_after_first_generation():
     agent = BaseAgent(name="Test", provider="openai", model="gpt-4o-mini", system_prompt="system")
     agent._cache.clear()
-    with patch.object(agent._client, "generate", return_value="hello") as mocked_generate:
+    llm_result = LLMResult(
+        success=True,
+        text="hello",
+        error_type=None,
+        provider="openai",
+        model="gpt-4o-mini",
+        retry_after_seconds=None,
+    )
+    with patch.object(agent._client, "generate_result", return_value=llm_result) as mocked_generate:
         first = agent.run("task")
         second = agent.run("task")
     assert first == "hello"
     assert second == "hello"
     assert mocked_generate.call_count == 1
+
+
+def test_is_cacheable_response_rejects_failed_llm_result():
+    llm_result = LLMResult(
+        success=False,
+        text='{"provider_error": true, "error_type": "rate_limit"}',
+        error_type="rate_limit",
+        provider="groq",
+        model="demo",
+        retry_after_seconds=1,
+    )
+
+    assert BaseAgent.is_cacheable_response(llm_result.text, llm_result=llm_result) is False

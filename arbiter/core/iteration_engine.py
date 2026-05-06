@@ -1,8 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Optional
 import re
+import time
 from uuid import uuid4
 
+from arbiter.app.result_formatter import ResultFormatter
 from arbiter.models.state import ArbiterState, IterationRecord
 from arbiter.models.result import ArbiterResult
 from arbiter.core.agent_runner import AgentRunner
@@ -51,6 +53,7 @@ class IterationEngine:
         self.verifier = FinalVerifier()
         self.memory = get_memory_store()
         self.benchmarks = get_benchmark_store()
+        self.formatter = ResultFormatter()
         self.stable_mode = stable_mode
         self.benchmark_mode = benchmark_mode
         # Optional callback: on_iteration_complete(state, record) for UI updates
@@ -127,7 +130,7 @@ class IterationEngine:
                     review_confidence="low",
                     verification_status="BLOCKED",
                     verification_score=0.0,
-                    verification_summary="Provider failure blocked verification for this round.",
+                    verification_summary="Verification was blocked because a provider or model failed during the review chain. This is a process failure, not a confirmed content failure.",
                     verification_checks=[{"name": "provider_gate", "status": "fail", "detail": "Architect generation was blocked by a provider issue."}],
                     ship_readiness="BLOCKED",
                     tech_critique=proposal_error.get("critique", "Architect provider error."),
@@ -256,7 +259,7 @@ class IterationEngine:
                     self._record_role_call(state, "Tech Critic", "Tech Critic", tech_model)
                     self._record_role_call(state, "Logic Critic", "Logic Critic", logic_model)
                     critic_overlap = self._critic_overlap(t_res, l_res)
-                    critic_redundancy = critic_overlap >= 0.72
+                    critic_redundancy = self._should_trigger_critic_rerun(t_res, l_res, critic_overlap)
                     if critic_redundancy:
                         extra_instruction = (
                             "You are the Logic Critic. Do NOT repeat the technical review. "
@@ -276,7 +279,7 @@ class IterationEngine:
                             l_res = rerun_logic
                             logic_model = rerun_logic_model
                             critic_overlap = rerun_overlap
-                        critic_redundancy = critic_overlap >= 0.72
+                        critic_redundancy = self._should_trigger_critic_rerun(t_res, l_res, critic_overlap)
                     t_score = t_res.get("score", 1)
                     l_score = l_res.get("score", 1)
                     avg_score = self.scorer.compute(t_res, l_res, task_mode=state.task_mode)
@@ -286,17 +289,13 @@ class IterationEngine:
                     state.record_model_usage("Janitor", janitor_model, self.runner.latest_call_metadata("Janitor"))
                     state.track_cost("Janitor", self.runner.latest_call_cost("Janitor", janitor_model))
 
-                    preflight_html = (
-                        "<div class=\"score-badge danger\">LOCAL PREFLIGHT FAILED</div><br>"
-                        "<b style='color:#ff6682;'>Detected Before Full Critic Loop:</b><br>"
-                        + "<br>".join(f"• {issue}" for issue in preflight_issues)
-                        + "<div style='background:rgba(255,170,0,0.06);padding:12px;border-radius:8px;"
-                        "margin-top:12px;border-left:3px solid #ffaa00;'>"
-                        "<b>DIAGNOSTIC CRITIC PASS:</b><br>"
-                        "Arbiter ran one bounded critic round anyway so the architect can see the broader failure set "
-                        "without entering a full paid loop."
-                        "</div><br>"
-                        + self._build_critique_html(t_score, l_score, avg_score, t_res, l_res, None)
+                    preflight_html = self.formatter.preflight_diagnostic_html(
+                        preflight_issues,
+                        t_score,
+                        l_score,
+                        avg_score,
+                        t_res,
+                        l_res,
                     )
                     stop_reason = "Preflight failed after repair; completed one diagnostic critic pass."
                     fix_text = (
@@ -306,17 +305,7 @@ class IterationEngine:
                     )
                     diagnostic_provider_error = bool(t_res.get("provider_error") or l_res.get("provider_error"))
                 else:
-                    preflight_html = (
-                        "<div class=\"score-badge danger\">LOCAL PREFLIGHT FAILED</div><br>"
-                        "<b style='color:#ff6682;'>Blocked Before Critic Spend:</b><br>"
-                        + "<br>".join(f"• {issue}" for issue in preflight_issues)
-                        + "<div style='background:rgba(255,68,102,0.06);padding:12px;border-radius:8px;"
-                        "margin-top:12px;border-left:3px solid #ff4466;'>"
-                        "<b>COST GUARDRAIL:</b><br>"
-                        "Stopped before critic calls because the architect output still failed local correctness checks. "
-                        "Gemini/Groq critic spend stays at zero in this case by design."
-                        "</div>"
-                    )
+                    preflight_html = self.formatter.preflight_blocked_html(preflight_issues)
                     stop_reason = "Preflight validation failed."
                     fix_text = "Repair the listed preflight issues and return a complete corrected solution."
                     diagnostic_provider_error = False
@@ -420,7 +409,7 @@ class IterationEngine:
             self._record_role_call(state, "Logic Critic", "Logic Critic", l_model)
 
             critic_overlap = self._critic_overlap(t_res, l_res)
-            critic_redundancy = critic_overlap >= 0.72
+            critic_redundancy = self._should_trigger_critic_rerun(t_res, l_res, critic_overlap)
             if critic_redundancy:
                 extra_instruction = (
                     "You are the Logic Critic. Do NOT repeat the technical review. "
@@ -440,7 +429,7 @@ class IterationEngine:
                     l_res = rerun_logic
                     l_model = rerun_logic_model
                     critic_overlap = rerun_overlap
-                critic_redundancy = critic_overlap >= 0.72
+                critic_redundancy = self._should_trigger_critic_rerun(t_res, l_res, critic_overlap)
 
             if SETTINGS.critic_debate_enabled:
                 debate, debate_model = self.runner.run_critic_debate(proposal, t_res, l_res)
@@ -842,6 +831,7 @@ class IterationEngine:
         run_id: str,
         iteration: int,
     ) -> tuple[dict, str, dict, str]:
+        started_at = time.perf_counter()
         if not SETTINGS.parallel_critics:
             tech_result, tech_model = self.runner.run_tech_critic(proposal, context)
             logic_result, logic_model = self.runner.run_logic_critic(proposal, context)
@@ -921,6 +911,21 @@ class IterationEngine:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
+        wall_time_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+        tech_latency_ms = float(self.runner.latest_call_metadata("Tech Critic").get("latency_ms", 0.0) or 0.0)
+        logic_latency_ms = float(self.runner.latest_call_metadata("Logic Critic").get("latency_ms", 0.0) or 0.0)
+        serial_estimate_ms = round(tech_latency_ms + logic_latency_ms, 2)
+        latency_saved_ms = round(max(0.0, serial_estimate_ms - wall_time_ms), 2)
+        logger.info(
+            "parallel_critics_completed",
+            extra={
+                "run_id": run_id,
+                "iteration": iteration,
+                "critic_wall_time_ms": wall_time_ms,
+                "serial_estimate_ms": serial_estimate_ms,
+                "latency_saved_ms": latency_saved_ms,
+            },
+        )
         return tech_result, tech_model, logic_result, logic_model
 
     def _run_verification(
@@ -1082,7 +1087,27 @@ class IterationEngine:
         return len(tech_tokens & logic_tokens) / len(tech_tokens | logic_tokens)
 
     @staticmethod
+    def _critics_in_same_redundancy_band(tech_result: dict, logic_result: dict) -> bool:
+        tech_score = int(tech_result.get("score", 0) or 0)
+        logic_score = int(logic_result.get("score", 0) or 0)
+        return (tech_score <= 5 and logic_score <= 5) or (tech_score >= 7 and logic_score >= 7)
+
+    @classmethod
+    def _should_trigger_critic_rerun(
+        cls,
+        tech_result: dict,
+        logic_result: dict,
+        overlap: Optional[float] = None,
+    ) -> bool:
+        critic_overlap = float(cls._critic_overlap(tech_result, logic_result) if overlap is None else overlap)
+        if critic_overlap < 0.72:
+            return False
+        if not SETTINGS.critic_redundancy_score_band_check:
+            return True
+        return cls._critics_in_same_redundancy_band(tech_result, logic_result)
+
     def _build_critique_html(
+        self,
         t_score: int,
         l_score: int,
         avg: float,
@@ -1091,64 +1116,12 @@ class IterationEngine:
         debate: Optional[dict] = None,
         raw_avg: Optional[float] = None,
     ) -> str:
-        badge_cls = (
-            "" if avg >= 7
-            else "warning" if avg >= 5
-            else "danger"
+        return self.formatter.critique_html(
+            t_score=t_score,
+            l_score=l_score,
+            avg=avg,
+            t_res=t_res,
+            l_res=l_res,
+            debate=debate,
+            raw_avg=raw_avg,
         )
-        critic_average = float(raw_avg if raw_avg is not None else avg)
-        score_line = (
-            f"TECH: {t_score}/10 &nbsp;|&nbsp; LOGIC: {l_score}/10 "
-            f"&nbsp;|&nbsp; CRITIC AVG: {critic_average:.1f}/10 "
-            f"&nbsp;|&nbsp; FINAL: {avg:.1f}/10"
-        )
-        debate_block = ""
-        if debate:
-            debate_block = f"""
-<div style='background:rgba(255,255,255,0.03);padding:12px;border-radius:8px;
-            margin-top:12px;border-left:3px solid #7fffd0;'>
-    <b>CRITIC DEBATE:</b><br>
-    • Tech focus: {debate.get('tech_focus', 'n/a')}<br>
-    • Logic focus: {debate.get('logic_focus', 'n/a')}<br>
-    • Combined fix: {debate.get('combined_fix', 'n/a')}
-</div>
-"""
-        tech_issues = t_res.get("issues", [])
-        logic_issues = l_res.get("issues", [])
-        tech_contract = t_res.get("repair_contract", [])
-        logic_contract = l_res.get("repair_contract", [])
-        tech_issue_block = ""
-        logic_issue_block = ""
-        if tech_issues:
-            tech_issue_block = "<br><b style='color:#7fffd0;'>Full Technical Findings:</b><br>" + "<br>".join(
-                f"• {issue}" for issue in tech_issues
-            )
-        if logic_issues:
-            logic_issue_block = "<br><b style='color:#7fffd0;'>Full Logic Findings:</b><br>" + "<br>".join(
-                f"• {issue}" for issue in logic_issues
-            )
-        repair_contract_block = ""
-        if tech_contract or logic_contract:
-            repair_contract_block = (
-                "<div style='background:rgba(255,255,255,0.03);padding:12px;border-radius:8px;"
-                "margin-top:12px;border-left:3px solid #ffaa00;'>"
-                "<b>REPAIR CONTRACT:</b><br>"
-                + ("<b>Tech:</b><br>" + "<br>".join(f"• {step}" for step in tech_contract) if tech_contract else "")
-                + ("<br><b>Logic:</b><br>" + "<br>".join(f"• {step}" for step in logic_contract) if logic_contract else "")
-                + "</div>"
-            )
-        return f"""
-<div class="score-badge {badge_cls}">
-    {score_line}
-</div><br>
-<b style='color:#00ffa3;'>Technical Audit:</b> {t_res.get('critique', 'No issues.')}{tech_issue_block}<br><br>
-<b style='color:#00ffa3;'>Logic Audit:</b> {l_res.get('critique', 'No issues.')}{logic_issue_block}<br>
-<div style='background:rgba(0,255,163,0.05);padding:12px;border-radius:8px;
-            margin-top:15px;border-left:3px solid #00ffa3;'>
-    <b>FIX PRIORITY:</b><br>
-    • Tech: {t_res.get('fix_suggestion', 'None.')}<br>
-    • Logic: {l_res.get('fix_suggestion', 'None.')}
-</div>
-{repair_contract_block}
-{debate_block}
-"""

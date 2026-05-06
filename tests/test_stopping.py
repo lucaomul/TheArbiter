@@ -34,3 +34,23 @@ def test_should_stop_on_plateau_detection():
     stop, reason = stopper.should_stop(state)
     assert stop is True
     assert "plateau" in reason.lower()
+
+
+def test_should_stop_on_recent_low_tech_guardrail():
+    state = make_state(iteration=2, avg_scores=[4.5, 4.6], last_tech=4)
+    state.recent_low_tech_count = 2
+
+    stop, reason = Stopper(max_iterations=5, target_score=8.5, auto_mode=True).should_stop(state)
+
+    assert stop is True
+    assert "failure-budget" in reason.lower()
+
+
+def test_should_stop_on_oscillation_guardrail():
+    state = make_state(iteration=3, avg_scores=[5.0, 5.1, 5.0], last_tech=4)
+    state.tech_oscillation_count = 1
+
+    stop, reason = Stopper(max_iterations=5, target_score=8.5, auto_mode=True).should_stop(state)
+
+    assert stop is True
+    assert "oscillation" in reason.lower()

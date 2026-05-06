@@ -1,6 +1,8 @@
 import ast
 import html
+import json
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
@@ -33,7 +35,7 @@ class FinalVerifier:
                 status="BLOCKED",
                 confidence="low",
                 score=0.0,
-                summary="Provider failure blocked verification for this round.",
+                summary="Verification was blocked because a provider or model failed during the review chain. This is a process failure, not a confirmed content failure.",
                 checks=[self._check("verification_gate", "fail", "Provider error prevented a clean verification pass.")],
             )
 
@@ -64,6 +66,12 @@ class FinalVerifier:
             checks.extend(self._verify_planning(task_text, raw, explicit_code_request))
         else:
             checks.extend(self._verify_general(task_text, raw, explicit_code_request))
+
+        if self._expects_json(task_text):
+            checks.extend(self._verify_expected_json(raw))
+
+        if self._expects_sql(task_text):
+            checks.extend(self._verify_expected_sql(raw))
 
         confirmed_count = len(list(tech_confirmed_defects or [])) + len(list(logic_confirmed_defects or []))
         if confirmed_count:
@@ -139,8 +147,13 @@ class FinalVerifier:
 
         if language == "python":
             try:
-                ast.parse(code)
+                tree = ast.parse(code)
                 checks.append(self._check("python_parse", "pass", "Python syntax parsed successfully."))
+                safety_status, safety_detail = self._assess_python_static_safety(tree)
+                checks.append(self._check("python_static_safety", safety_status, safety_detail))
+                smoke_check = self._maybe_execute_zero_arg_python_functions(tree, code)
+                if smoke_check is not None:
+                    checks.append(smoke_check)
             except SyntaxError as exc:
                 checks.append(self._check("python_parse", "fail", f"Python syntax error: line {exc.lineno}, {exc.msg}."))
         elif language == "javascript":
@@ -373,6 +386,78 @@ class FinalVerifier:
         ]
 
     @staticmethod
+    def _expects_json(task_text: str) -> bool:
+        lowered = str(task_text or "").lower()
+        return any(
+            token in lowered
+            for token in ["json", "schema", "structured output", "return json"]
+        )
+
+    @staticmethod
+    def _expects_sql(task_text: str) -> bool:
+        lowered = str(task_text or "").lower()
+        return any(
+            token in lowered
+            for token in ["sql", "sqlite", "sql query", "sql script", "select ", "create table", "insert into"]
+        )
+
+    def _verify_expected_json(self, raw: str) -> list[dict]:
+        candidate = self._extract_json_candidate(raw)
+        if not candidate:
+            return [
+                self._check(
+                    "expected_json_output",
+                    "caution",
+                    "The task asked for JSON, but the response did not contain a clear JSON payload.",
+                )
+            ]
+        try:
+            json.loads(candidate)
+        except Exception as exc:
+            return [
+                self._check(
+                    "expected_json_output",
+                    "caution",
+                    f"JSON was expected, but parsing failed: {str(exc).strip() or 'unknown JSON error'}.",
+                )
+            ]
+        return [self._check("expected_json_output", "pass", "A parseable JSON payload was detected.")]
+
+    def _verify_expected_sql(self, raw: str) -> list[dict]:
+        candidate = self._extract_sql_candidate(raw)
+        if not candidate:
+            return [
+                self._check(
+                    "expected_sql_output",
+                    "caution",
+                    "The task asked for SQL, but the response did not contain a clear SQL snippet.",
+                )
+            ]
+        if not self._sql_is_standalone(candidate):
+            return [
+                self._check(
+                    "expected_sql_output",
+                    "caution",
+                    "SQL was detected, but safe validation needs standalone schema context or self-contained statements.",
+                )
+            ]
+        try:
+            connection = sqlite3.connect(":memory:")
+            try:
+                connection.executescript(candidate)
+            finally:
+                connection.close()
+        except sqlite3.Error as exc:
+            return [
+                self._check(
+                    "expected_sql_output",
+                    "fail",
+                    f"SQLite rejected the SQL snippet: {str(exc).strip() or 'unknown SQL error'}.",
+                )
+            ]
+        return [self._check("expected_sql_output", "pass", "Standalone SQL executed cleanly in an in-memory SQLite check.")]
+
+    @staticmethod
     def _extract_primary_code(content: str) -> str:
         matches = list(re.finditer(r"```(\w+)?\n?(.*?)```", content, flags=re.DOTALL))
         if matches:
@@ -381,10 +466,44 @@ class FinalVerifier:
         return html.unescape(str(content or "")).strip()
 
     @staticmethod
+    def _extract_json_candidate(raw: str) -> str:
+        fenced = re.findall(r"```(?:json)?\s*(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE)
+        for block in fenced:
+            candidate = block.strip()
+            if candidate.startswith("{") or candidate.startswith("["):
+                return candidate
+        stripped = raw.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return stripped
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(stripped):
+            if char not in "{[":
+                continue
+            try:
+                parsed, end = decoder.raw_decode(stripped[index:])
+                if isinstance(parsed, (dict, list)):
+                    return stripped[index:index + end]
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    def _extract_sql_candidate(raw: str) -> str:
+        fenced = re.findall(r"```(?:sql)?\s*(.*?)```", raw, flags=re.DOTALL | re.IGNORECASE)
+        if fenced:
+            return html.unescape(max(fenced, key=len).strip())
+        stripped = html.unescape(str(raw or "")).strip()
+        if re.search(r"\b(select|insert|update|delete|create|drop|alter|with)\b", stripped, flags=re.IGNORECASE):
+            return stripped
+        return ""
+
+    @staticmethod
     def _detect_language(code: str, raw: str) -> str:
         header = str(raw[:120]).lower()
         if re.search(r"^\s*(def |from |import )", code, flags=re.MULTILINE):
             return "python"
+        if re.search(r"^\s*(select|insert|update|delete|create|drop|alter|with)\b", code, flags=re.IGNORECASE):
+            return "sql"
         if re.search(r"\b(function|const|let|var)\b", code) or "javascript" in header or "js" in header:
             return "javascript"
         return "unknown"
@@ -409,3 +528,123 @@ class FinalVerifier:
     def _is_scheduling_task(text: str) -> bool:
         lowered = str(text or "").lower()
         return sum(1 for token in ["schedule", "shift", "staff", "hours"] if token in lowered) >= 2
+
+    @staticmethod
+    def _assess_python_static_safety(tree: ast.AST) -> Tuple[str, str]:
+        banned_nodes = (
+            ast.Import,
+            ast.ImportFrom,
+            ast.With,
+            ast.AsyncWith,
+            ast.Try,
+            ast.Raise,
+            ast.Delete,
+            ast.Global,
+            ast.Nonlocal,
+            ast.ClassDef,
+            ast.Lambda,
+            ast.Yield,
+            ast.YieldFrom,
+            ast.Await,
+        )
+        unsafe_calls = {"open", "exec", "eval", "compile", "input", "print", "__import__", "breakpoint"}
+        unsafe_attrs = {
+            "write",
+            "read",
+            "system",
+            "popen",
+            "remove",
+            "unlink",
+            "rmtree",
+            "mkdir",
+            "makedirs",
+            "chmod",
+            "chown",
+            "rename",
+            "replace",
+            "connect",
+            "execute",
+            "executemany",
+            "executescript",
+            "urlopen",
+            "request",
+            "post",
+            "put",
+            "delete",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, banned_nodes):
+                return "caution", "Python parsed, but the verifier avoided execution because imports or side-effect-heavy constructs were present."
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in unsafe_calls:
+                    return "caution", "Python parsed, but the verifier avoided execution because unsafe builtins or side effects were detected."
+                if isinstance(node.func, ast.Attribute) and node.func.attr.lower() in unsafe_attrs:
+                    return "caution", "Python parsed, but the verifier avoided execution because possible filesystem, network, or process side effects were detected."
+            if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+                return "caution", "Python parsed, but the verifier avoided execution because dunder access was detected."
+        return "pass", "AST inspection found no obvious imports, filesystem access, or network/process side effects."
+
+    def _maybe_execute_zero_arg_python_functions(self, tree: ast.AST, code: str) -> Optional[dict]:
+        zero_arg_functions = []
+        for node in getattr(tree, "body", []):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            required_args = len(node.args.args) - len(node.args.defaults)
+            has_kwonly_required = any(default is None for default in node.args.kw_defaults)
+            if required_args == 0 and not node.args.vararg and not node.args.kwarg and not has_kwonly_required:
+                zero_arg_functions.append(node.name)
+
+        if not zero_arg_functions:
+            return None
+
+        safe_builtins = {
+            "abs": abs,
+            "all": all,
+            "any": any,
+            "bool": bool,
+            "dict": dict,
+            "enumerate": enumerate,
+            "float": float,
+            "int": int,
+            "len": len,
+            "list": list,
+            "max": max,
+            "min": min,
+            "range": range,
+            "round": round,
+            "set": set,
+            "sorted": sorted,
+            "str": str,
+            "sum": sum,
+            "tuple": tuple,
+            "zip": zip,
+        }
+        namespace = {"__builtins__": safe_builtins}
+        try:
+            exec(compile(tree, "<arbiter-verifier>", "exec"), namespace, namespace)
+            for function_name in zero_arg_functions[:2]:
+                namespace[function_name]()
+        except Exception as exc:
+            return self._check(
+                "python_smoke_execution",
+                "fail",
+                f"Safe zero-argument smoke execution failed: {str(exc).strip() or 'unknown runtime error'}.",
+            )
+        return self._check(
+            "python_smoke_execution",
+            "pass",
+            "Safe zero-argument Python helpers executed without runtime errors.",
+        )
+
+    @staticmethod
+    def _sql_is_standalone(candidate: str) -> bool:
+        lowered = str(candidate or "").lower()
+        if "create table" in lowered:
+            return True
+        select_literal_pattern = re.compile(
+            r"^\s*select\s+[\w\s,'\"().+\-/*]+;?\s*$",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if select_literal_pattern.match(candidate) and " from " not in lowered:
+            return True
+        return False

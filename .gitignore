@@ -10,3 +10,5 @@ __pycache__/
 arbiter.db
 *.sqlite
 *.sqlite3
+evals/results/
+*.egg-info/
