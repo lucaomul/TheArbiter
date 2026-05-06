@@ -88,12 +88,16 @@ class ModelSelector:
 
         # 1. Manual override
         if agent in self._overrides:
-            model_id = self._overrides[agent]
+            requested_model = self._overrides[agent]
+            model_id = self._registry.resolve_model_id(requested_model)
             if self._provider_lock and provider_for_model(model_id, "") != self._provider_lock:
                 fallbacks = self.fallback_models(agent, "")
                 if fallbacks:
                     model_id = fallbacks[0]
-            if self.is_temporarily_unavailable(model_id):
+            if (not self._registry.is_selectable(model_id, agent)) or self.is_temporarily_unavailable(model_id):
+                replacement = self._registry.recommended_replacement(model_id, agent)
+                if replacement:
+                    model_id = replacement
                 fallbacks = self.fallback_models(agent, model_id)
                 if fallbacks:
                     model_id = fallbacks[0]
@@ -104,7 +108,7 @@ class ModelSelector:
                 model_id,
                 provider,
                 iteration,
-                reason="Manual override via sidebar or programmatic set_override.",
+                reason=f"Manual override via sidebar or programmatic set_override ({requested_model} -> {model_id}).",
                 confidence="high",
                 perf=None,
                 cost=self._registry.cost_for(model_id),
@@ -152,7 +156,7 @@ class ModelSelector:
                 return chosen.model_id, chosen.provider
 
         # 3. Exploration
-        if len(candidates) > 1 and random.random() < SETTINGS.exploration_rate:
+        if len(candidates) > 1 and not context.get("stable_mode") and random.random() < SETTINGS.exploration_rate:
             chosen = random.choice(candidates)
             self._log(
                 decision_log,
@@ -185,10 +189,11 @@ class ModelSelector:
     # ── Compatibility helpers for older runner code ──────────
 
     def fallback_models(self, agent: str, current_model: str = "") -> list[str]:
+        current_model = self._registry.resolve_model_id(current_model)
         candidates = self._registry.candidates_for_role(agent)
         if self._provider_lock:
             candidates = [plugin for plugin in candidates if plugin.provider == self._provider_lock]
-        manual_override_model = self._overrides.get(agent, "")
+        manual_override_model = self._registry.resolve_model_id(self._overrides.get(agent, ""))
         if manual_override_model and current_model == manual_override_model:
             return []
         current_provider = provider_for_model(current_model, "")
@@ -212,6 +217,9 @@ class ModelSelector:
             key=sort_key,
         )
         ordered = [plugin.model_id for plugin in ordered_plugins]
+        replacement = self._registry.recommended_replacement(current_model, agent)
+        if replacement and replacement != current_model and replacement not in ordered:
+            ordered.insert(0, replacement)
         available = [model_id for model_id in ordered if not self.is_temporarily_unavailable(model_id)]
         return available or ordered
 

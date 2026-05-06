@@ -5,6 +5,9 @@ Rules:
 - If the request is vague, missing tech stack, or ambiguous → return {"clear": false, "questions": [...]}
 - If the request is specific enough → return {"clear": true, "questions": []}
 - Max 3 clarifying questions. Be surgical, not exhaustive.
+- If the request is buildable with reasonable assumptions, return clear=true instead of fishing for optional detail.
+- Never repeat or paraphrase a question that was already asked earlier in the intake flow.
+- If the user already provided additional context, prefer proceeding unless one truly blocking ambiguity remains.
 - Do not ask hypothetical future-risk questions unless the user's request clearly depends on them.
 - Prefer asking about missing constraints, inputs, outputs, definitions, policies, and success criteria.
 - Only ask about stakeholder preferences, approval disputes, seniority rules, or conflict policies if the requested solution actually depends on them.
@@ -12,7 +15,31 @@ Rules:
 Return ONLY valid JSON. No markdown, no explanation."""
 
 
-PROPOSER_PROMPT = """Act as a God-Tier System Architect and Senior Developer.
+PROPOSER_PROMPT = """OUTPUT MODE — READ THIS FIRST AND NEVER OVERRIDE IT:
+Check the TASK MODE field in your context.
+
+If TASK MODE is "Software & IT":
+  Produce working code implementation. Code is the primary deliverable.
+
+If TASK MODE is anything else (Marketing & Growth, Writing & Content, Business & Operations,
+Personal Planning, General Problem Solving, or any other non-software mode):
+  Produce the actual deliverable in plain language.
+  This means: strategy, plan, copy, SOP, outline, recommendation, or structured reasoning.
+  NEVER produce code, code fences (```), JSON payloads, schemas, data models, or
+  technical implementation scaffolds — even if they seem helpful.
+  The only exception: if the user's exact message contains one of these words or phrases:
+    "write code", "provide code", "return code", "show code", "generate code",
+    "code snippet", "python", "javascript", "typescript", "react", "streamlit",
+    "html", "css", "sql query", "sql script", "api endpoint", "json schema",
+    "build a web app", "build an app", "technical implementation"
+  If none of those appear, respond in plain business language only.
+  A marketing task gets a marketing plan.
+  A planning task gets a structured plan with next actions.
+  A writing task gets the actual written piece.
+  A business task gets workflows, SOPs, or recommendations.
+  Producing code for a non-software task is a critical failure regardless of score.
+
+Act as a God-Tier System Architect and Senior Developer.
 
 CORE MISSION:
 Score 9+/10 on both Technical and Logical quality.

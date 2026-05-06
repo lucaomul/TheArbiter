@@ -1,4 +1,5 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -22,7 +23,7 @@ class Settings:
     cheap_model_threshold: float = 6.0
 
     # Exploration rate for model selector (0-1)
-    exploration_rate: float = 0.0
+    exploration_rate: float = 0.08
 
     # Validation / repair
     enable_preflight: bool = True
@@ -36,6 +37,16 @@ class Settings:
     rate_limit_cooldown_seconds: int = 45 * 60
     provider_error_cooldown_seconds: int = 5 * 60
     decommission_cooldown_seconds: int = 7 * 24 * 60 * 60
+
+    def __post_init__(self):
+        if not 0.0 <= float(self.exploration_rate) <= 1.0:
+            raise ValueError("Settings.exploration_rate must be between 0.0 and 1.0.")
+        if int(self.max_iterations) < 1:
+            raise ValueError("Settings.max_iterations must be >= 1.")
+        if not 1.0 <= float(self.target_score) <= 10.0:
+            raise ValueError("Settings.target_score must be between 1.0 and 10.0.")
+        if int(self.plateau_rounds) < 1:
+            raise ValueError("Settings.plateau_rounds must be >= 1.")
 
 
 SETTINGS = Settings()
@@ -53,6 +64,35 @@ PRICES: dict = {
     "llama-3.3-70b-versatile": 0.000001,
     "llama-3.1-8b-instant":    0.000001,
 }
+
+
+TOKEN_PRICING_USD_PER_MILLION: dict = {
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
+    "claude-3-5-haiku-latest": {"input": 0.80, "output": 4.00},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
+    "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
+}
+
+
+def token_pricing_for_model(model: str) -> Optional[dict]:
+    return TOKEN_PRICING_USD_PER_MILLION.get(model)
+
+
+def estimate_token_cost_usd(
+    model: str,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> Optional[float]:
+    pricing = token_pricing_for_model(model)
+    if not pricing:
+        return None
+    input_cost = (max(0, int(prompt_tokens or 0)) / 1_000_000.0) * float(pricing["input"])
+    output_cost = (max(0, int(completion_tokens or 0)) / 1_000_000.0) * float(pricing["output"])
+    return round(input_cost + output_cost, 8)
 
 
 TASK_PROFILES: dict = {

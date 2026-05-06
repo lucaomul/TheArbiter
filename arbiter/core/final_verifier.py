@@ -79,17 +79,22 @@ class FinalVerifier:
         caution_count = sum(1 for item in checks if item["status"] == "caution")
         pass_count = sum(1 for item in checks if item["status"] == "pass")
         total = max(len(checks), 1)
-        score = round((pass_count + (0.5 * caution_count)) / total, 2)
+        base_verification = round((pass_count + (0.5 * caution_count)) / total, 2)
+        defect_penalty = min(confirmed_count * 0.08, 0.40)
+        score = round(max(0.0, base_verification - defect_penalty), 2)
 
-        if fail_count:
+        if fail_count >= 1:
             status = "FAILED"
             confidence = "low"
-        elif caution_count:
+        elif caution_count <= 1 and confirmed_count == 0:
+            status = "VERIFIED"
+            confidence = "high"
+        elif caution_count > 1 or confirmed_count > 0:
             status = "CAUTION"
             confidence = "guarded"
         else:
-            status = "VERIFIED"
-            confidence = "high"
+            status = "CAUTION"
+            confidence = "guarded"
 
         summary = self._build_summary(status, checks)
         return VerificationResult(
@@ -179,10 +184,17 @@ class FinalVerifier:
         return checks
 
     @staticmethod
+    def _extract_user_request(task_text: str) -> str:
+        raw = str(task_text or "")
+        if "USER REQUEST:" in raw:
+            return raw.split("USER REQUEST:", 1)[-1].strip()
+        return raw.strip()
+
+    @staticmethod
     def _explicit_code_request(task_mode: str, task_text: str) -> bool:
         if task_mode == "Software & IT":
             return True
-        lowered = str(task_text or "").lower()
+        lowered = FinalVerifier._extract_user_request(task_text).lower()
         strong_signals = [
             "write code",
             "provide code",

@@ -150,10 +150,17 @@ class PreflightValidator:
         return matches[:5]
 
     @staticmethod
+    def _extract_user_request(task_text: str) -> str:
+        raw = str(task_text or "")
+        if "USER REQUEST:" in raw:
+            return raw.split("USER REQUEST:", 1)[-1].strip()
+        return raw.strip()
+
+    @staticmethod
     def _explicit_code_request(task_mode: str, task_text: str) -> bool:
         if task_mode == "Software & IT":
             return True
-        lowered = str(task_text or "").lower()
+        lowered = PreflightValidator._extract_user_request(task_text).lower()
         strong_signals = [
             "write code",
             "provide code",

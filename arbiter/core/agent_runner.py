@@ -1,4 +1,5 @@
 from typing import Optional
+import logging
 
 from arbiter.agents.base_agent import (
     BaseAgent,
@@ -14,6 +15,9 @@ from arbiter.infra.model_selector import get_model_selector
 from arbiter.infra.performance_store import get_performance_store
 from arbiter.infra.decision_log import DecisionLog
 from arbiter.config.settings import PRICES, SETTINGS
+from arbiter.infra.plugin_registry import provider_for_model
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRunner:
@@ -28,6 +32,7 @@ class AgentRunner:
         self.perf      = get_performance_store()
         self.decision_log = DecisionLog()
         self.current_iteration = 0
+        self._last_call_metadata: dict[str, dict] = {}
 
     def run_auditor(self, task: str, context: dict = None) -> dict:
         prompt = self.registry.get("Auditor")
@@ -36,7 +41,16 @@ class AgentRunner:
             attempted.append(model)
             agent = AuditorAgent(model=model, system_prompt=prompt)
             result = agent.audit(task)
+            self._capture_call_metadata("Auditor", agent)
             if not result.get("provider_error"):
+                logger.info(
+                    "auditor_completed",
+                    extra={
+                        "iteration": self.current_iteration,
+                        "model": model,
+                        "provider": provider_for_model(model, ""),
+                    },
+                )
                 return result, model
             self._handle_provider_error(model, result)
         return result, attempted[-1] if attempted else ""
@@ -49,8 +63,17 @@ class AgentRunner:
             attempted.append(model)
             agent = ArchitectAgent(model=model, system_prompt=prompt)
             solution = agent.generate(task, history=history)
+            self._capture_call_metadata("Architect", agent)
             error_payload = BaseAgent.error_payload(solution)
             if not error_payload or not error_payload.get("provider_error"):
+                logger.info(
+                    "architect_completed",
+                    extra={
+                        "iteration": self.current_iteration,
+                        "model": model,
+                        "provider": provider_for_model(model, ""),
+                    },
+                )
                 return solution, model
             self._handle_provider_error(model, error_payload)
             last_solution = solution
@@ -67,10 +90,20 @@ class AgentRunner:
             attempted.append(model)
             agent = TechCriticAgent(model=model, system_prompt=prompt)
             result = agent.evaluate(solution)
+            self._capture_call_metadata("Tech Critic", agent)
             if result.get("parse_error"):
                 result = self._attempt_repair(result.get("raw_output", "")) or result
             if not result.get("provider_error"):
                 self.perf.record("Tech Critic", model, result.get("score", 1))
+                logger.info(
+                    "tech_critic_completed",
+                    extra={
+                        "iteration": self.current_iteration,
+                        "model": model,
+                        "provider": provider_for_model(model, ""),
+                        "score": result.get("score", 1),
+                    },
+                )
                 return result, model
             self._handle_provider_error(model, result)
         return result, attempted[-1] if attempted else ""
@@ -82,10 +115,20 @@ class AgentRunner:
             attempted.append(model)
             agent = LogicCriticAgent(model=model, system_prompt=prompt)
             result = agent.evaluate(solution, extra_instruction=extra_instruction)
+            self._capture_call_metadata("Logic Critic", agent)
             if result.get("parse_error"):
                 result = self._attempt_repair(result.get("raw_output", "")) or result
             if not result.get("provider_error"):
                 self.perf.record("Logic Critic", model, result.get("score", 1))
+                logger.info(
+                    "logic_critic_completed",
+                    extra={
+                        "iteration": self.current_iteration,
+                        "model": model,
+                        "provider": provider_for_model(model, ""),
+                        "score": result.get("score", 1),
+                    },
+                )
                 return result, model
             self._handle_provider_error(model, result)
         return result, attempted[-1] if attempted else ""
@@ -97,7 +140,16 @@ class AgentRunner:
             attempted.append(model)
             agent = JanitorAgent(model=model, system_prompt=prompt)
             result = agent.consolidate(payload)
+            self._capture_call_metadata("Janitor", agent)
             if not result.get("provider_error"):
+                logger.info(
+                    "janitor_completed",
+                    extra={
+                        "iteration": self.current_iteration,
+                        "model": model,
+                        "provider": provider_for_model(model, ""),
+                    },
+                )
                 return result, model
             self._handle_provider_error(model, result)
         return result, attempted[-1] if attempted else ""
@@ -108,6 +160,7 @@ class AgentRunner:
         for model in self._candidate_models("Repair", {"force_quality": False}):
             agent = RepairAgent(model=model, system_prompt=prompt)
             result = agent.repair(raw_output)
+            self._capture_call_metadata("Repair", agent)
             if result and not result.get("provider_error"):
                 return result
             if result:
@@ -139,6 +192,7 @@ class AgentRunner:
             system_prompt=system_prompt,
         )
         raw = agent.run(user_prompt, force_json=False)
+        self._capture_call_metadata("Critic Debate", agent)
         error_payload = BaseAgent.error_payload(raw)
         if error_payload and error_payload.get("provider_error"):
             self._handle_provider_error("llama-3.1-8b-instant", error_payload)
@@ -200,6 +254,32 @@ class AgentRunner:
                 "cooldown_seconds": cooldown,
             },
         )
+        logger.warning(
+            "provider_cooldown_applied",
+            extra={
+                "iteration": self.current_iteration,
+                "model": model,
+                "provider": provider_for_model(model, ""),
+                "error_type": error_type,
+            },
+        )
+
+    def _capture_call_metadata(self, role: str, agent: BaseAgent):
+        self._last_call_metadata[role] = agent.last_call_metadata()
+
+    def latest_call_metadata(self, role: str) -> dict:
+        return dict(self._last_call_metadata.get(role, {}))
+
+    def latest_call_cost(self, role: str, fallback_model: str = "") -> float:
+        metadata = self.latest_call_metadata(role)
+        if metadata:
+            try:
+                return max(0.0, float(metadata.get("estimated_cost_usd", 0.0) or 0.0))
+            except Exception:
+                pass
+        if fallback_model:
+            return self.model_cost(fallback_model)
+        return 0.0
 
     @staticmethod
     def _normalize_debate_result(result: dict) -> dict:

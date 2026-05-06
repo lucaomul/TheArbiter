@@ -18,6 +18,7 @@ class BaseAgent:
         self.system_prompt = system_prompt
         self._client       = get_llm_client()
         self._cache        = get_cache()
+        self._last_call_metadata = {}
 
     def run(self, user_prompt: str, history: str = "", force_json: bool = False) -> str:
         full_prompt = (
@@ -29,6 +30,17 @@ class BaseAgent:
         # Check cache
         cached = self._cache.get(self.provider, self.model, full_prompt)
         if cached:
+            self._last_call_metadata = self._client._build_usage_metadata(
+                provider=self.provider,
+                model=self.model,
+                system_prompt=self.system_prompt,
+                user_prompt=full_prompt,
+                output_text=cached,
+                usage={},
+                latency_ms=0.0,
+                cost_method="cache_hit",
+                cached=True,
+            )
             return cached
 
         response = self._client.generate(
@@ -39,10 +51,83 @@ class BaseAgent:
             force_json=force_json and self.provider == "openai",
             temperature=0.1 if self.name != "Architect" else 0.4,
         )
+        self._last_call_metadata = self._client.get_last_call_metadata()
 
         if self.is_cacheable_response(response):
             self._cache.set(self.provider, self.model, full_prompt, response)
         return response
+
+    def last_call_metadata(self) -> dict:
+        return dict(self._last_call_metadata or {})
+
+    @staticmethod
+    def extract_task_mode(task_text: str) -> str:
+        match = re.search(r"^\s*TASK MODE:\s*(.+?)\s*$", str(task_text or ""), flags=re.MULTILINE)
+        return str(match.group(1)).strip() if match else ""
+
+    @staticmethod
+    def extract_user_request(task_text: str) -> str:
+        raw = str(task_text or "")
+        if "USER REQUEST:" in raw:
+            return raw.split("USER REQUEST:", 1)[-1].strip()
+        return raw.strip()
+
+    @staticmethod
+    def explicit_code_request(task_mode: str, task_text: str) -> bool:
+        if task_mode == "Software & IT":
+            return True
+        lowered = BaseAgent.extract_user_request(task_text).lower()
+        strong_signals = [
+            "write code",
+            "provide code",
+            "return code",
+            "show code",
+            "generate code",
+            "code snippet",
+            "python",
+            "javascript",
+            "typescript",
+            "react",
+            "streamlit",
+            "html",
+            "css",
+            "sql query",
+            "sql script",
+            "api endpoint",
+            "json schema",
+            "build a web app",
+            "build an app",
+            "technical implementation",
+        ]
+        return any(signal in lowered for signal in strong_signals)
+
+    @staticmethod
+    def looks_like_wrong_modality_code(raw: str) -> bool:
+        content = str(raw or "")
+        if re.search(r"```[\w-]*", content):
+            return True
+
+        non_empty_lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not non_empty_lines:
+            return False
+
+        code_like_count = 0
+        for line in non_empty_lines:
+            if re.search(
+                r"^\s*(def |class |function |const |let |var |import |from |SELECT |INSERT |UPDATE |CREATE )",
+                line,
+                flags=re.IGNORECASE,
+            ):
+                code_like_count += 1
+                continue
+            if re.search(r"[{};]|=>", line):
+                code_like_count += 1
+                continue
+            if re.search(r"</?[a-z][^>]*>", line, flags=re.IGNORECASE):
+                code_like_count += 1
+                continue
+
+        return code_like_count >= max(4, len(non_empty_lines) // 3)
 
     @staticmethod
     def is_cacheable_response(response: str) -> bool:
@@ -152,13 +237,6 @@ class BaseAgent:
         if not result["repair_contract"] and result["fix_suggestion"]:
             result["repair_contract"] = [result["fix_suggestion"]]
 
-        # Avoid punishing speculative issues like confirmed defects.
-        if not result["confirmed_defects"]:
-            if result["risks"] and result["score"] < 7:
-                result["score"] = 7
-            elif result["improvements"] and not result["risks"] and result["score"] < 8:
-                result["score"] = 8
-
         critique_lower = result["critique"].lower()
         result["provider_error"] = (
             bool(result.get("provider_error"))
@@ -184,7 +262,38 @@ class ArchitectAgent(BaseAgent):
         super().__init__("Architect", provider, model, system_prompt)
 
     def generate(self, task: str, history: str = "") -> str:
-        return self.run(task, history=history, force_json=False)
+        response = self.run(task, history=history, force_json=False)
+        task_mode = self.extract_task_mode(task)
+        if not task_mode or task_mode == "Software & IT":
+            return response
+        if self.explicit_code_request(task_mode, task):
+            return response
+        if not self.looks_like_wrong_modality_code(response):
+            return response
+
+        rewrite_prompt = (
+            "Your previous answer violated the required output mode for this task.\n"
+            "You are handling a non-software request and must return the actual deliverable in plain language only.\n"
+            "Do NOT return code, code fences, JSON, schemas, HTML, CSS, SQL, APIs, data models, or implementation scaffolds.\n"
+            "Return only the real deliverable the user asked for: plan, strategy, copy, workflow, SOP, recommendation, or structured reasoning.\n\n"
+            f"TASK MODE: {task_mode}\n\n"
+            f"ORIGINAL USER REQUEST:\n{self.extract_user_request(task)}\n\n"
+            "YOUR PREVIOUS INVALID ANSWER:\n"
+            f"{response}"
+        )
+        rewritten = self.run(rewrite_prompt, history="", force_json=False)
+        if not self.looks_like_wrong_modality_code(rewritten):
+            return rewritten
+
+        final_retry_prompt = (
+            "Final correction.\n"
+            "Return only a plain-language business deliverable.\n"
+            "Use short headings and bullets if helpful, but absolutely no code, JSON, tables, schemas, or fenced blocks.\n"
+            "Do not explain that you are correcting yourself. Just deliver the answer properly.\n\n"
+            f"TASK MODE: {task_mode}\n\n"
+            f"ORIGINAL USER REQUEST:\n{self.extract_user_request(task)}"
+        )
+        return self.run(final_retry_prompt, history="", force_json=False)
 
 
 class TechCriticAgent(BaseAgent):

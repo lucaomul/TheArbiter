@@ -1,0 +1,9 @@
+services:
+  arbiter:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./.arbiter_memory:/app/.arbiter_memory
+    restart: unless-stopped

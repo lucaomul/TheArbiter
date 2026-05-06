@@ -142,12 +142,15 @@ class ArbiterState:
     def add_message(self, role: str, content: str):
         self.messages.append({"role": role, "content": content})
 
-    def record_model_usage(self, role: str, model: str):
-        self.model_usage.append({
+    def record_model_usage(self, role: str, model: str, metadata: Optional[dict] = None):
+        entry = {
             "iteration": self.iteration,
             "role": role,
             "model": model,
-        })
+        }
+        if metadata:
+            entry.update(dict(metadata))
+        self.model_usage.append(entry)
 
     def _update_issue_tracking(self, record: IterationRecord):
         tech_items = list(record.tech_confirmed_defects or record.tech_issues or [])
@@ -290,5 +293,9 @@ class ArbiterState:
             })
 
     def track_cost(self, role: str, amount: float):
+        try:
+            amount = max(0.0, float(amount or 0.0))
+        except Exception:
+            amount = 0.0
         self.costs[role]    = self.costs.get(role, 0.0) + amount
         self.costs["Total"] = self.costs.get("Total", 0.0) + amount

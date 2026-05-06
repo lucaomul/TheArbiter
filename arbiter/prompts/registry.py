@@ -69,10 +69,12 @@ class PromptRegistry:
         return (
             "DELIVERY FORMAT:\n"
             f"- {delivery}\n"
-            "- Return the deliverable in plain business/content language by default.\n"
-            "- Do not return executable code, code fences, JSON payloads, schemas, or technical implementation scaffolds unless the user explicitly asks for them.\n"
-            "- If the task mentions a product or system but does not explicitly request implementation, respond with strategy, plan, messaging, operations, or content output instead of code.\n"
-            "- Keep the response concrete, concise, and outcome-oriented."
+            "- You are NOT producing a software solution. This is a strict rule.\n"
+            "- Do NOT produce code, code fences (```), JSON objects, schemas, data models, or technical implementation of any kind.\n"
+            "- If you feel the urge to write a code block or a JSON structure, stop immediately. Rewrite that section as plain language instead.\n"
+            "- Respond with the actual deliverable the task requires: a plan, strategy, copy, SOP, workflow, outline, or recommendation — all in plain text.\n"
+            "- Only include technical output if the user explicitly and directly asks for code for a specific subsection.\n"
+            "- Keep the response concrete, concise, and immediately actionable."
         )
 
     @staticmethod

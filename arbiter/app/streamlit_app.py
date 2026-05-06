@@ -23,9 +23,16 @@ from arbiter.config.settings import SETTINGS, TASK_PROFILES, PRICES
 from arbiter.infra.cache import get_cache
 from arbiter.infra.memory_store import get_memory_store
 from arbiter.infra.benchmark_suite import get_benchmark_packs, get_benchmark_cases, get_case_by_id
+from arbiter.infra.plugin_registry import get_plugin_registry, provider_for_model
 from arbiter.app.ui_styles import UI_CSS
+from arbiter.app.visual_summaries import build_visual_blueprint_html
 
 load_dotenv(PROJECT_ROOT / ".env", override=True)
+REGISTRY = get_plugin_registry()
+try:
+    REGISTRY.sync_catalog_if_needed()
+except Exception:
+    pass
 
 # ── Page config ─────────────────────────────────────────────
 st.set_page_config(
@@ -50,6 +57,9 @@ defaults = {
     "last_tech_score":   None,
     "task_mode":         "Software & IT",
     "pending_questions": [],
+    "audit_round_count": 0,
+    "audit_question_history": [],
+    "audit_resolution_note": "",
     "rewrite_mode":      False,
     "tech_stall_count":  0,
     "score_plateau_count": 0,
@@ -82,6 +92,10 @@ defaults = {
     "manual_feedback_text": "",
     "project_note_text": "",
     "task_draft": "",
+    "task_input_seq": 0,
+    "clarification_input_seq": 0,
+    "manual_feedback_input_seq": 0,
+    "project_note_input_seq": 0,
     "pending_auto_run": False,
     "run_in_progress": False,
     "auto_mode_enabled": False,
@@ -101,6 +115,9 @@ defaults = {
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+
+MAX_AUDIT_CLARIFICATION_ROUNDS = 3
 
 # ── CSS ──────────────────────────────────────────────────────
 st.markdown(UI_CSS, unsafe_allow_html=True)
@@ -202,9 +219,13 @@ def reset_run_state(keep_task_mode: bool = True):
         "manual_model_selection": st.session_state.manual_model_selection,
         "selected_models": dict(st.session_state.selected_models),
         "task_draft": st.session_state.task_draft,
+        "task_input_seq": int(st.session_state.task_input_seq or 0) + 1,
         "auto_mode_enabled": st.session_state.auto_mode_enabled,
         "target_score_setting": st.session_state.target_score_setting,
         "max_iterations_setting": st.session_state.max_iterations_setting,
+        "clarification_input_seq": int(st.session_state.clarification_input_seq or 0) + 1,
+        "manual_feedback_input_seq": int(st.session_state.manual_feedback_input_seq or 0) + 1,
+        "project_note_input_seq": int(st.session_state.project_note_input_seq or 0) + 1,
     }
     for key, value in defaults.items():
         if key == "task_mode":
@@ -219,16 +240,112 @@ def reset_run_state(keep_task_mode: bool = True):
     for key, value in preserved_ui.items():
         st.session_state[key] = value
     st.session_state.audit_status = "idle"
+    st.session_state.audit_round_count = 0
+    st.session_state.audit_question_history = []
+    st.session_state.audit_resolution_note = ""
 
 
 def get_available_models_for_role(role: str) -> list:
-    from arbiter.infra.plugin_registry import get_plugin_registry
-
-    registry = get_plugin_registry()
-    models = [plugin.model_id for plugin in registry.candidates_for_role(role)]
-    if role == "Logic Critic" and "gemini-2.5-flash" not in models:
+    models = [plugin.model_id for plugin in REGISTRY.candidates_for_role(role)]
+    if (
+        role == "Logic Critic"
+        and "gemini-2.5-flash" not in models
+        and registry_is_selectable("gemini-2.5-flash", role)
+    ):
         models.append("gemini-2.5-flash")
     return models
+
+
+def normalize_audit_question(text: str) -> str:
+    value = str(text or "").strip().lower()
+    value = re.sub(r"[^\w\s]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def audit_questions_similar(left: str, right: str) -> bool:
+    a = normalize_audit_question(left)
+    b = normalize_audit_question(right)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    a_tokens = set(a.split())
+    b_tokens = set(b.split())
+    if not a_tokens or not b_tokens:
+        return False
+    overlap = len(a_tokens & b_tokens) / max(len(a_tokens), len(b_tokens))
+    return overlap >= 0.75
+
+
+def sanitize_audit_questions(items, limit: int = 3) -> list[str]:
+    cleaned = []
+    for item in items or []:
+        question = str(item or "").strip()
+        if not question:
+            continue
+        if any(audit_questions_similar(question, existing) for existing in cleaned):
+            continue
+        cleaned.append(question)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def registry_resolve_model_id(model_id: str) -> str:
+    if hasattr(REGISTRY, "resolve_model_id"):
+        try:
+            return str(REGISTRY.resolve_model_id(model_id) or "").strip()
+        except Exception:
+            pass
+    return str(model_id or "").strip()
+
+
+def registry_is_selectable(model_id: str, role: str = "") -> bool:
+    resolved = registry_resolve_model_id(model_id)
+    if hasattr(REGISTRY, "is_selectable"):
+        try:
+            return bool(REGISTRY.is_selectable(resolved, role))
+        except Exception:
+            pass
+    try:
+        plugin = REGISTRY.get(resolved) if hasattr(REGISTRY, "get") else None
+        if plugin is None:
+            return False
+        if role and role not in getattr(plugin, "roles", []):
+            return False
+        if not getattr(plugin, "enabled", True):
+            return False
+        if str(getattr(plugin, "availability", "available") or "").lower() in {
+            "deprecated",
+            "unavailable",
+        }:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def registry_recommended_replacement(model_id: str, role: str = "") -> str:
+    resolved = registry_resolve_model_id(model_id)
+    if hasattr(REGISTRY, "recommended_replacement"):
+        try:
+            return str(REGISTRY.recommended_replacement(resolved, role) or "").strip()
+        except Exception:
+            pass
+    options = get_available_models_for_role(role)
+    return options[0] if options else resolved
+
+
+def normalize_role_model(role: str, model_id: str) -> str:
+    resolved = registry_resolve_model_id(model_id)
+    if registry_is_selectable(resolved, role):
+        return resolved
+    replacement = registry_recommended_replacement(resolved, role)
+    if replacement:
+        return replacement
+    options = get_available_models_for_role(role)
+    return options[0] if options else resolved
 
 
 def apply_model_preset(name: str):
@@ -237,7 +354,10 @@ def apply_model_preset(name: str):
         return
     st.session_state.provider_lock = preset["provider_lock"]
     st.session_state.stable_mode = preset["stable_mode"]
-    st.session_state.selected_models = dict(preset["models"])
+    st.session_state.selected_models = {
+        role: normalize_role_model(role, model_id)
+        for role, model_id in dict(preset["models"]).items()
+    }
 
 
 def build_retry_context() -> str:
@@ -447,7 +567,10 @@ def render_deliberation_scene():
     run_in_progress = bool(st.session_state.run_in_progress)
     has_result = bool(st.session_state.iteration_history) and not run_in_progress
     pipeline_running = step == "negotiation" and run_in_progress
-    auditor_only = step in {"input", "audit", "clarification"} and not run_in_progress and not has_result
+    auditor_only = step in {"audit", "clarification"} and not run_in_progress and not has_result
+
+    if step == "input" and not st.session_state.current_task and not has_result and not run_in_progress:
+        return
 
     architect_status = flow_map.get("Architect Draft", "idle")
     critics_status = flow_map.get("Counsel Debate", "idle")
@@ -886,6 +1009,9 @@ def get_latest_message(role: str) -> str:
 
 
 def render_auditor_surface():
+    if st.session_state.step == "input" and not st.session_state.current_task:
+        return
+
     auditor_message = normalize_visible_message(get_latest_message("Auditor"))
     if st.session_state.audit_status == "needs_clarification" or st.session_state.pending_questions:
         with st.container(border=True):
@@ -900,6 +1026,8 @@ def render_auditor_surface():
         with st.container(border=True):
             st.subheader("Auditor Intake")
             st.success("The brief is specific enough to proceed.")
+            if st.session_state.audit_resolution_note:
+                st.caption(st.session_state.audit_resolution_note)
             cleaned = str(auditor_message or "").strip().lower()
             if auditor_message and "specific enough to proceed" not in cleaned and "check passed" not in cleaned:
                 st.write(auditor_message)
@@ -1268,6 +1396,7 @@ def render_benchmark_lab():
         st.session_state.task_mode = selected_case["task_mode"]
         st.session_state.task_draft = selected_case["prompt"]
         st.session_state.current_task = selected_case["prompt"]
+        st.session_state.task_input_seq += 1
         st.session_state.step = "input"
         st.success("Scenario loaded into the task editor.")
         st.rerun()
@@ -1559,6 +1688,32 @@ def render_review_panel():
             render_list(logic_improvements)
 
 
+def render_visual_blueprint():
+    if not st.session_state.iteration_history:
+        return
+
+    latest = st.session_state.iteration_history[-1]
+    janitor = {
+        "pending": latest.get("janitor_pending", []),
+        "preserve": latest.get("janitor_preserve", []),
+    }
+    solution = get_latest_message("Architect") or st.session_state.current_solution or latest.get("solution", "")
+    visual_html = build_visual_blueprint_html(
+        st.session_state.task_mode,
+        st.session_state.current_task or st.session_state.task_draft,
+        solution,
+        janitor_report=janitor,
+    )
+    if not visual_html:
+        return
+
+    st.markdown("### Visual Blueprint")
+    st.markdown(
+        "A mode-aware schematic view of the current answer, rendered directly from the result without image generation.",
+    )
+    st.markdown(visual_html, unsafe_allow_html=True)
+
+
 # ── Sidebar ──────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("<h1 style='color:#ffffff;font-size:1.45rem;margin-bottom:0;'>The Arbiter</h1>", unsafe_allow_html=True)
@@ -1639,7 +1794,7 @@ with st.sidebar:
         st.markdown("<p style='font-size:0.7rem;color:#b6c4d6;letter-spacing:2px;margin-top:12px;'>MODEL SELECTION</p>", unsafe_allow_html=True)
         for role in role_order:
             options = get_available_models_for_role(role)
-            current_value = st.session_state.selected_models.get(role, options[0] if options else "")
+            current_value = normalize_role_model(role, st.session_state.selected_models.get(role, options[0] if options else ""))
             if current_value not in options and options:
                 current_value = options[0]
             chosen = st.selectbox(
@@ -1656,11 +1811,12 @@ with st.sidebar:
 
     # Push model choices into selector overrides
     from arbiter.infra.model_selector import get_model_selector
-    from arbiter.infra.plugin_registry import provider_for_model
     sel = get_model_selector()
     sel.set_provider_lock("" if provider_lock_option == "mixed" else provider_lock_option)
     for role, model in role_models.items():
-        sel.set_override(role, model)
+        normalized_model = normalize_role_model(role, model)
+        sel.set_override(role, normalized_model)
+        role_models[role] = normalized_model
 
     if any(provider_for_model(model, "") == "anthropic" for model in role_models.values()) and not os.getenv("ANTHROPIC_API_KEY"):
         st.warning("Claude/Anthropic models are selected, but `ANTHROPIC_API_KEY` is not set in your `.env` yet.")
@@ -1677,11 +1833,11 @@ with st.sidebar:
     st.markdown("""
     <div class="luca-branding">
         <div class="luca-name">Built by Luca Crăciun</div>
-        <div style='margin-top:12px;'>
+        <div class="luca-links-row">
             <a href="https://github.com/lucaomul" class="luca-link">GitHub</a>
             <a href="https://www.linkedin.com/in/gabriel-luca-craciun-25ba95295" class="luca-link">LinkedIn</a>
         </div>
-        <div style='font-size:0.68rem;color:#9fb0c5;margin-top:10px;'>The Arbiter product build</div>
+        <div class="luca-meta">The Arbiter product build</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1699,7 +1855,10 @@ if st.session_state.iteration_history:
     with right_col:
         render_review_panel()
         render_intelligence_signals()
-elif st.session_state.step in {"input", "audit", "clarification"}:
+    render_visual_blueprint()
+elif st.session_state.step in {"audit", "clarification"} or (
+    st.session_state.step == "negotiation" and st.session_state.audit_status == "passed" and not st.session_state.iteration_history
+):
     render_auditor_surface()
 
 # ════════════════════════════════════════════════
@@ -1728,17 +1887,20 @@ if st.session_state.step == "input":
                     max_value=8,
                     value=int(st.session_state.max_iterations_setting),
                 )
+        task_input_key = f"task_input_{st.session_state.task_input_seq}"
         u_input = st.text_area(
             "OVERRIDE COMMAND:",
             value=st.session_state.task_draft,
             placeholder="Describe your technical task in detail...",
             height=150,
+            key=task_input_key,
         )
         submitted = st.form_submit_button("INITIALIZE COGNITIVE LOOP")
     st.caption("The Arbiter will either ask for missing context or confirm that the task is clear enough to proceed.")
     if submitted and u_input:
         reset_run_state(keep_task_mode=True)
-        st.session_state.task_draft = u_input
+        st.session_state.task_draft = ""
+        st.session_state.task_input_seq += 1
         st.session_state.current_task = u_input
         st.session_state.step = "audit"
         st.rerun()
@@ -1769,13 +1931,43 @@ elif st.session_state.step == "audit":
         st.session_state.model_usage = result.debug_info.get("model_usage", [])
 
     if result.debug_info.get("needs_clarification"):
-        st.session_state.pending_questions = result.debug_info.get("questions", [])
-        st.session_state.audit_status = "needs_clarification"
-        st.session_state.step = "clarification"
+        questions = sanitize_audit_questions(result.debug_info.get("questions", []), limit=3)
+        history = list(st.session_state.audit_question_history or [])
+        new_questions = [
+            question for question in questions
+            if not any(audit_questions_similar(question, existing) for existing in history)
+        ]
+
+        st.session_state.audit_round_count = int(st.session_state.audit_round_count or 0) + 1
+        round_count = st.session_state.audit_round_count
+        repeated_only = bool(questions) and not new_questions
+        reached_cap = round_count >= MAX_AUDIT_CLARIFICATION_ROUNDS
+
+        if repeated_only or reached_cap:
+            st.session_state.pending_questions = []
+            st.session_state.audit_status = "passed"
+            st.session_state.audit_question_history = history + list(questions)
+            st.session_state.audit_resolution_note = (
+                "Auditor clarification limit reached. Proceeding with the current context to avoid an intake loop."
+                if reached_cap
+                else "Auditor began repeating the same clarification themes. Proceeding with the current context to avoid a loop."
+            )
+            st.session_state.step = "negotiation"
+            st.session_state.pending_auto_run = True
+            st.session_state.run_in_progress = True
+        else:
+            st.session_state.pending_questions = new_questions or questions
+            st.session_state.audit_question_history = history + list(st.session_state.pending_questions)
+            st.session_state.audit_status = "needs_clarification"
+            st.session_state.audit_resolution_note = ""
+            st.session_state.step = "clarification"
         st.rerun()
     else:
         st.session_state.pending_questions = []
         st.session_state.audit_status = "passed"
+        st.session_state.audit_round_count = 0
+        st.session_state.audit_question_history = []
+        st.session_state.audit_resolution_note = ""
         st.session_state.step = "negotiation"
         st.session_state.pending_auto_run = True
         st.session_state.run_in_progress = True
@@ -1787,12 +1979,14 @@ elif st.session_state.step == "audit":
 # ════════════════════════════════════════════════
 elif st.session_state.step == "clarification":
     st.caption("Respond to the Auditor below so the case can proceed.")
+    clarification_key = f"clarification_input_{st.session_state.clarification_input_seq}"
     with st.form("arbiter_clarification_form", clear_on_submit=False):
-        ans = st.text_area("PROVIDE ADDITIONAL DATA:", height=120)
+        ans = st.text_area("PROVIDE ADDITIONAL DATA:", height=120, key=clarification_key)
         clarify_submitted = st.form_submit_button("RE-SYNCHRONIZE")
     if clarify_submitted:
         if ans.strip():
-            st.session_state.current_task += f" | Additional context: {ans.strip()}"
+            st.session_state.current_task += f"\nAdditional context:\n{ans.strip()}"
+        st.session_state.clarification_input_seq += 1
         st.session_state.step = "audit"
         st.rerun()
 
@@ -1830,11 +2024,12 @@ elif st.session_state.step == "negotiation":
             help="Turn this on only when you want to inject personal instructions or extra project context.",
         )
         if st.session_state.manual_feedback_enabled:
+            manual_feedback_key = f"manual_feedback_input_{st.session_state.manual_feedback_input_seq}"
             st.session_state.manual_feedback_text = st.text_area(
                 "Manual Feedback / Extra Project Context",
-                value=st.session_state.manual_feedback_text,
                 placeholder="Add personal feedback, constraints, product context, or extra instructions here...",
                 height=140,
+                key=manual_feedback_key,
             )
         else:
             st.session_state.manual_feedback_text = ""
@@ -1858,11 +2053,12 @@ elif st.session_state.step == "negotiation":
             else:
                 st.caption("Project notes will appear after a full app restart loads the updated memory module.")
 
+            project_note_key = f"project_note_input_{st.session_state.project_note_input_seq}"
             st.session_state.project_note_text = st.text_area(
                 "Save a project note",
-                value=st.session_state.project_note_text,
                 placeholder="Example: For scheduling tasks, employee preferences come by email and non-responders are treated as flexible.",
                 height=110,
+                key=project_note_key,
             )
             if st.button("Save Project Note", key="save_project_note"):
                 note_text = str(st.session_state.project_note_text or "").strip()
@@ -1872,6 +2068,7 @@ elif st.session_state.step == "negotiation":
                         task_mode=st.session_state.task_mode,
                     )
                     st.session_state.project_note_text = ""
+                    st.session_state.project_note_input_seq += 1
                     st.session_state.memory_stats = memory_store.stats()
                     st.success("Project note saved to persistent memory.")
                     st.rerun()

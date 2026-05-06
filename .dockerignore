@@ -1,0 +1,6 @@
+.env
+.arbiter_memory/
+__pycache__/
+**/*.pyc
+venv/
+.git/

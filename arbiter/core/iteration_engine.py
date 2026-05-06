@@ -1,4 +1,5 @@
 from typing import Optional
+import logging
 import re
 from uuid import uuid4
 
@@ -15,6 +16,8 @@ from arbiter.prompts.registry import PromptRegistry
 from arbiter.config.settings import SETTINGS
 from arbiter.infra.memory_store import get_memory_store
 from arbiter.infra.benchmark_store import get_benchmark_store
+
+logger = logging.getLogger(__name__)
 
 
 class IterationEngine:
@@ -58,6 +61,10 @@ class IterationEngine:
         while not stop:
             state.iteration += 1
             self.runner.current_iteration = state.iteration
+            logger.info(
+                "iteration_started",
+                extra={"run_id": run_id, "iteration": state.iteration},
+            )
             recommendations = self.optimizer.optimize(state)
 
             # Context for model selector
@@ -85,11 +92,20 @@ class IterationEngine:
                 history=history_str,
                 context=context,
             )
-            state.track_cost("Architect", self.runner.model_cost(arch_model))
-            state.record_model_usage("Architect", arch_model)
+            state.track_cost("Architect", self.runner.latest_call_cost("Architect", arch_model))
+            state.record_model_usage("Architect", arch_model, self.runner.latest_call_metadata("Architect"))
 
             proposal_error = BaseAgent.error_payload(proposal)
             if proposal_error and proposal_error.get("provider_error"):
+                logger.warning(
+                    "architect_provider_blocked",
+                    extra={
+                        "run_id": run_id,
+                        "iteration": state.iteration,
+                        "model": arch_model,
+                        "provider": proposal_error.get("provider", ""),
+                    },
+                )
                 state.current_solution = ""
                 state.add_message(
                     "Architect",
@@ -171,6 +187,14 @@ class IterationEngine:
                 preflight_issues = validation.issues
 
             if preflight_issues and SETTINGS.allow_repair_retry:
+                logger.info(
+                    "preflight_repair_triggered",
+                    extra={
+                        "run_id": run_id,
+                        "iteration": state.iteration,
+                        "issue_count": len(preflight_issues),
+                    },
+                )
                 state.preflight_events += 1
                 repair_prompt = self.preflight.build_repair_prompt(
                     state.current_task,
@@ -182,8 +206,8 @@ class IterationEngine:
                     history=history_str,
                     context={**context, "force_quality": True},
                 )
-                state.track_cost("Architect", self.runner.model_cost(repair_model))
-                state.record_model_usage("Architect Repair", repair_model)
+                state.track_cost("Architect", self.runner.latest_call_cost("Architect", repair_model))
+                state.record_model_usage("Architect Repair", repair_model, self.runner.latest_call_metadata("Architect"))
                 state.repair_events += 1
                 validation = self.preflight.validate(state.task_mode, state.current_task, proposal)
                 preflight_issues = validation.issues
@@ -192,6 +216,14 @@ class IterationEngine:
             state.add_message("Architect", proposal)
 
             if preflight_issues:
+                logger.warning(
+                    "preflight_failed",
+                    extra={
+                        "run_id": run_id,
+                        "iteration": state.iteration,
+                        "issue_count": len(preflight_issues),
+                    },
+                )
                 t_score = 1
                 l_score = 1
                 avg_score = 1.0
@@ -212,10 +244,10 @@ class IterationEngine:
                 if SETTINGS.allow_diagnostic_critics_on_preflight_fail:
                     t_res, tech_model = self.runner.run_tech_critic(proposal, {**context, "force_quality": False})
                     l_res, logic_model = self.runner.run_logic_critic(proposal, {**context, "force_quality": False})
-                    state.track_cost("Tech Critic", self.runner.model_cost(tech_model))
-                    state.track_cost("Logic Critic", self.runner.model_cost(logic_model))
-                    state.record_model_usage("Tech Critic", tech_model)
-                    state.record_model_usage("Logic Critic", logic_model)
+                    state.track_cost("Tech Critic", self.runner.latest_call_cost("Tech Critic", tech_model))
+                    state.track_cost("Logic Critic", self.runner.latest_call_cost("Logic Critic", logic_model))
+                    state.record_model_usage("Tech Critic", tech_model, self.runner.latest_call_metadata("Tech Critic"))
+                    state.record_model_usage("Logic Critic", logic_model, self.runner.latest_call_metadata("Logic Critic"))
                     critic_overlap = self._critic_overlap(t_res, l_res)
                     critic_redundancy = critic_overlap >= 0.72
                     if critic_redundancy:
@@ -232,8 +264,8 @@ class IterationEngine:
                             extra_instruction=extra_instruction,
                         )
                         rerun_overlap = self._critic_overlap(t_res, rerun_logic)
-                        state.track_cost("Logic Critic", self.runner.model_cost(rerun_logic_model))
-                        state.record_model_usage("Logic Critic Recheck", rerun_logic_model)
+                        state.track_cost("Logic Critic", self.runner.latest_call_cost("Logic Critic", rerun_logic_model))
+                        state.record_model_usage("Logic Critic Recheck", rerun_logic_model, self.runner.latest_call_metadata("Logic Critic"))
                         if rerun_overlap < critic_overlap:
                             l_res = rerun_logic
                             logic_model = rerun_logic_model
@@ -245,8 +277,8 @@ class IterationEngine:
                     janitor_payload = self._build_janitor_payload(state, proposal, preflight_issues, t_res, l_res)
                     janitor_report, janitor_model = self.runner.run_janitor(janitor_payload, context)
                     janitor_report = self._filter_janitor_report(janitor_report, preflight_issues, t_res, l_res)
-                    state.record_model_usage("Janitor", janitor_model)
-                    state.track_cost("Janitor", self.runner.model_cost(janitor_model))
+                    state.record_model_usage("Janitor", janitor_model, self.runner.latest_call_metadata("Janitor"))
+                    state.track_cost("Janitor", self.runner.latest_call_cost("Janitor", janitor_model))
 
                     preflight_html = (
                         "<div class=\"score-badge danger\">LOCAL PREFLIGHT FAILED</div><br>"
@@ -373,10 +405,10 @@ class IterationEngine:
             t_res, t_model = self.runner.run_tech_critic(proposal, context)
             l_res, l_model = self.runner.run_logic_critic(proposal, context)
 
-            state.track_cost("Tech Critic",  self.runner.model_cost(t_model))
-            state.track_cost("Logic Critic", self.runner.model_cost(l_model))
-            state.record_model_usage("Tech Critic", t_model)
-            state.record_model_usage("Logic Critic", l_model)
+            state.track_cost("Tech Critic", self.runner.latest_call_cost("Tech Critic", t_model))
+            state.track_cost("Logic Critic", self.runner.latest_call_cost("Logic Critic", l_model))
+            state.record_model_usage("Tech Critic", t_model, self.runner.latest_call_metadata("Tech Critic"))
+            state.record_model_usage("Logic Critic", l_model, self.runner.latest_call_metadata("Logic Critic"))
 
             critic_overlap = self._critic_overlap(t_res, l_res)
             critic_redundancy = critic_overlap >= 0.72
@@ -394,8 +426,8 @@ class IterationEngine:
                     extra_instruction=extra_instruction,
                 )
                 rerun_overlap = self._critic_overlap(t_res, rerun_logic)
-                state.track_cost("Logic Critic", self.runner.model_cost(rerun_logic_model))
-                state.record_model_usage("Logic Critic Recheck", rerun_logic_model)
+                state.track_cost("Logic Critic", self.runner.latest_call_cost("Logic Critic", rerun_logic_model))
+                state.record_model_usage("Logic Critic Recheck", rerun_logic_model, self.runner.latest_call_metadata("Logic Critic"))
                 if rerun_overlap < critic_overlap:
                     l_res = rerun_logic
                     l_model = rerun_logic_model
@@ -404,16 +436,16 @@ class IterationEngine:
 
             if SETTINGS.critic_debate_enabled:
                 debate, debate_model = self.runner.run_critic_debate(proposal, t_res, l_res)
-                state.track_cost("Critic Debate", self.runner.model_cost(debate_model))
-                state.record_model_usage("Critic Debate", debate_model)
+                state.track_cost("Critic Debate", self.runner.latest_call_cost("Critic Debate", debate_model))
+                state.record_model_usage("Critic Debate", debate_model, self.runner.latest_call_metadata("Critic Debate"))
             else:
                 debate = {}
 
             janitor_payload = self._build_janitor_payload(state, proposal, preflight_issues, t_res, l_res)
             janitor_report, janitor_model = self.runner.run_janitor(janitor_payload, context)
             janitor_report = self._filter_janitor_report(janitor_report, preflight_issues, t_res, l_res)
-            state.record_model_usage("Janitor", janitor_model)
-            state.track_cost("Janitor", self.runner.model_cost(janitor_model))
+            state.record_model_usage("Janitor", janitor_model, self.runner.latest_call_metadata("Janitor"))
+            state.track_cost("Janitor", self.runner.latest_call_cost("Janitor", janitor_model))
 
             # ── 4. Score ─────────────────────────────────────
             raw_avg_score = self.scorer.compute(t_res, l_res, task_mode=state.task_mode)
@@ -442,6 +474,16 @@ class IterationEngine:
                 tech_result=t_res,
                 logic_result=l_res,
                 review_confidence=review_confidence,
+            )
+            logger.info(
+                "iteration_scored",
+                extra={
+                    "run_id": run_id,
+                    "iteration": state.iteration,
+                    "score": avg_score,
+                    "verification_status": verification.status,
+                    "ship_readiness": ship_readiness,
+                },
             )
 
             # ── 5. Build critique message ────────────────────
@@ -536,11 +578,29 @@ class IterationEngine:
 
             # ── 7. Stop check ────────────────────────────────
             stop, reason = self.stopper.should_stop(state)
+            logger.info(
+                "iteration_finished",
+                extra={
+                    "run_id": run_id,
+                    "iteration": state.iteration,
+                    "score": state.last_avg_score,
+                    "stop": stop,
+                },
+            )
 
         latest_validity = state.iteration_history[-1]["validity_status"] if state.iteration_history else "IDLE"
         latest_score_status = state.iteration_history[-1].get("score_status", "final") if state.iteration_history else "final"
         latest_verification_status = state.iteration_history[-1].get("verification_status", "UNVERIFIED") if state.iteration_history else "UNVERIFIED"
         latest_ship_readiness = state.iteration_history[-1].get("ship_readiness", "UNASSESSED") if state.iteration_history else "UNASSESSED"
+        logger.info(
+            "run_completed",
+            extra={
+                "run_id": run_id,
+                "iteration": state.iteration,
+                "score": state.best_iteration["avg"] if state.best_iteration else state.last_avg_score,
+                "validity_status": latest_validity,
+            },
+        )
         self.benchmarks.record_run(
             task_mode=state.task_mode,
             run_id=run_id,
@@ -599,6 +659,12 @@ class IterationEngine:
     @staticmethod
     def _build_janitor_payload(state: ArbiterState, proposal: str, preflight_issues: list, t_res: dict, l_res: dict) -> str:
         unresolved = getattr(state, "unresolved_issues", {"tech": [], "logic": []})
+        tech_defects = (t_res.get("confirmed_defects") or [])[:4]
+        tech_risks = (t_res.get("risks") or [])[:3]
+        tech_improve = (t_res.get("improvements") or [])[:3]
+        logic_defects = (l_res.get("confirmed_defects") or [])[:4]
+        logic_risks = (l_res.get("risks") or [])[:3]
+        logic_improve = (l_res.get("improvements") or [])[:3]
         return (
             "TASK MODE:\n"
             f"{state.task_mode}\n\n"
@@ -607,21 +673,27 @@ class IterationEngine:
             "PREFLIGHT ISSUES:\n"
             f"{preflight_issues}\n\n"
             "TECH CONFIRMED DEFECTS:\n"
-            f"{t_res.get('confirmed_defects', [])}\n\n"
+            + "\n".join(f"- {item}" for item in tech_defects) + "\n\n"
             "TECH RISKS:\n"
-            f"{t_res.get('risks', [])}\n\n"
+            + "\n".join(f"- {item}" for item in tech_risks) + "\n\n"
             "TECH IMPROVEMENTS:\n"
-            f"{t_res.get('improvements', [])}\n\n"
+            + "\n".join(f"- {item}" for item in tech_improve) + "\n\n"
             "TECH CRITIC FINDINGS:\n"
-            f"{t_res}\n\n"
+            f"Critique: {t_res.get('critique', '')}\n"
+            f"Fix suggestion: {t_res.get('fix_suggestion', '')}\n"
+            "Repair contract:\n"
+            + "\n".join(f"- {item}" for item in (t_res.get("repair_contract") or [])[:4]) + "\n\n"
             "LOGIC CONFIRMED DEFECTS:\n"
-            f"{l_res.get('confirmed_defects', [])}\n\n"
+            + "\n".join(f"- {item}" for item in logic_defects) + "\n\n"
             "LOGIC RISKS:\n"
-            f"{l_res.get('risks', [])}\n\n"
+            + "\n".join(f"- {item}" for item in logic_risks) + "\n\n"
             "LOGIC IMPROVEMENTS:\n"
-            f"{l_res.get('improvements', [])}\n\n"
+            + "\n".join(f"- {item}" for item in logic_improve) + "\n\n"
             "LOGIC CRITIC FINDINGS:\n"
-            f"{l_res}\n\n"
+            f"Critique: {l_res.get('critique', '')}\n"
+            f"Fix suggestion: {l_res.get('fix_suggestion', '')}\n"
+            "Repair contract:\n"
+            + "\n".join(f"- {item}" for item in (l_res.get("repair_contract") or [])[:4]) + "\n\n"
             "PREVIOUS UNRESOLVED ISSUES:\n"
             f"{unresolved}\n"
         )
@@ -656,18 +728,23 @@ class IterationEngine:
     @staticmethod
     def _calibrate_score(raw_avg_score: float, verification: VerificationResult) -> float:
         base = float(raw_avg_score or 0.0)
-        if verification.status == "VERIFIED":
+        if verification.status == "VERIFIED" and verification.score >= 0.85:
             return round(base, 2)
 
+        if verification.status == "VERIFIED":
+            return round(max(1.0, base * 0.97), 2)
+
         verification_equivalent = float(verification.score or 0.0) * 10.0
-        blended = round((base * 0.8) + (verification_equivalent * 0.2), 2)
 
         if verification.status == "CAUTION":
-            return max(1.0, min(base, blended))
+            blended = round((base * 0.75) + (verification_equivalent * 0.25), 2)
+            return max(1.0, min(blended, 8.0))
         if verification.status == "FAILED":
-            return max(1.0, min(blended, 6.5))
+            blended = round((base * 0.60) + (verification_equivalent * 0.40), 2)
+            return max(1.0, min(blended, 6.0))
         if verification.status == "BLOCKED":
-            return max(1.0, min(blended, 5.5))
+            blended = round((base * 0.50) + (verification_equivalent * 0.50), 2)
+            return max(1.0, min(blended, 5.0))
         return max(1.0, min(10.0, round(base, 2)))
 
     @staticmethod

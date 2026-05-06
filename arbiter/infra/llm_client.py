@@ -1,13 +1,27 @@
 import os
 import json
+import logging
 import re
+import time
 from pathlib import Path
 from urllib import error, request
-from openai import OpenAI
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional dependency in test/minimal environments
+    def load_dotenv(*_args, **_kwargs):
+        return False
+
+try:
+    from openai import OpenAI
+except ImportError:  # pragma: no cover - optional dependency in test/minimal environments
+    OpenAI = None
+
+from arbiter.config.settings import PRICES, estimate_token_cost_usd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -20,6 +34,7 @@ class LLMClient:
         self._openai_client = None
         self._groq_client   = None
         self._ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        self._last_call_metadata = {}
 
     @staticmethod
     def _extract_retry_after_seconds(message: str):
@@ -58,13 +73,100 @@ class LLMClient:
             payload["retry_after_seconds"] = retry_after_seconds
         return json.dumps(payload)
 
+    @staticmethod
+    def estimate_text_tokens(text: str) -> int:
+        text = str(text or "").strip()
+        if not text:
+            return 0
+        return max(1, int(round(len(text) / 4.0)))
+
+    def _build_usage_metadata(
+        self,
+        provider: str,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        output_text: str,
+        usage: dict = None,
+        latency_ms: float = None,
+        cost_method: str = "provider_usage",
+        cached: bool = False,
+    ) -> dict:
+        usage = usage or {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+
+        if prompt_tokens <= 0:
+            prompt_tokens = self.estimate_text_tokens(f"{system_prompt}\n{user_prompt}")
+        if completion_tokens <= 0:
+            completion_tokens = self.estimate_text_tokens(output_text)
+
+        estimated_cost = estimate_token_cost_usd(
+            model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        resolved_cost_method = cost_method
+        if estimated_cost is None:
+            estimated_cost = round(float(PRICES.get(model, 0.0) or 0.0), 8)
+            if cached:
+                estimated_cost = 0.0
+                resolved_cost_method = "cache_hit"
+            else:
+                resolved_cost_method = "flat_model_estimate"
+        elif cached:
+            estimated_cost = 0.0
+            resolved_cost_method = "cache_hit"
+        elif cost_method != "provider_usage":
+            resolved_cost_method = cost_method
+
+        return {
+            "provider": provider,
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": max(0, prompt_tokens + completion_tokens),
+            "estimated_cost_usd": round(float(estimated_cost or 0.0), 8),
+            "cost_method": resolved_cost_method,
+            "cached": bool(cached),
+            "latency_ms": latency_ms,
+        }
+
+    def _set_last_call_metadata(self, metadata: dict):
+        self._last_call_metadata = dict(metadata or {})
+
+    def get_last_call_metadata(self) -> dict:
+        return dict(self._last_call_metadata or {})
+
+    @staticmethod
+    def _response_error_type(response: str):
+        text = str(response or "").strip()
+        if not text.startswith("{"):
+            return None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return None
+        if payload.get("provider_error") or payload.get("error_type"):
+            return str(payload.get("error_type") or "provider_error")
+        return None
+
+    @staticmethod
+    def _require_openai_sdk(provider_label: str):
+        if OpenAI is None:
+            raise RuntimeError(
+                f"The `openai` package is not installed, so the {provider_label} client cannot be created."
+            )
+
     # ── Provider clients (lazy init) ──────────────────────────
-    def _get_openai(self) -> OpenAI:
+    def _get_openai(self):
+        self._require_openai_sdk("OpenAI")
         if self._openai_client is None:
             self._openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         return self._openai_client
 
-    def _get_groq(self) -> OpenAI:
+    def _get_groq(self):
+        self._require_openai_sdk("Groq")
         if self._groq_client is None:
             self._groq_client = OpenAI(
                 api_key=os.getenv("GROQ_API_KEY"),
@@ -82,19 +184,79 @@ class LLMClient:
         force_json: bool = False,
         temperature: float = 0.7,
     ) -> str:
+        start_time = time.perf_counter()
+        self._set_last_call_metadata({})
+        logger.debug(
+            "llm_call_start",
+            extra={
+                "provider": provider,
+                "model": model,
+                "force_json": force_json,
+            },
+        )
         try:
             if provider == "openai":
-                return self._call_openai(model, system_prompt, user_prompt, force_json, temperature)
+                response, usage = self._call_openai(model, system_prompt, user_prompt, force_json, temperature)
             elif provider == "groq":
-                return self._call_groq(model, system_prompt, user_prompt, temperature)
+                response, usage = self._call_groq(model, system_prompt, user_prompt, temperature)
             elif provider == "gemini":
-                return self._call_gemini(model, system_prompt, user_prompt, temperature)
+                response, usage = self._call_gemini(model, system_prompt, user_prompt, temperature)
             elif provider == "ollama":
-                return self._call_ollama(model, system_prompt, user_prompt, temperature)
+                response, usage = self._call_ollama(model, system_prompt, user_prompt, temperature)
             elif provider == "anthropic":
-                return self._call_anthropic(model, system_prompt, user_prompt, temperature)
+                response, usage = self._call_anthropic(model, system_prompt, user_prompt, temperature)
             else:
                 raise ValueError(f"Unknown provider: {provider}")
+            latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            error_type = self._response_error_type(response)
+            if error_type:
+                self._set_last_call_metadata(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "estimated_cost_usd": 0.0,
+                        "cost_method": "provider_error",
+                        "cached": False,
+                        "latency_ms": latency_ms,
+                        "error_type": error_type,
+                    }
+                )
+                logger.warning(
+                    "llm_call_failed",
+                    extra={
+                        "provider": provider,
+                        "model": model,
+                        "latency_ms": latency_ms,
+                        "error_type": error_type,
+                    },
+                )
+                return response
+            self._set_last_call_metadata(
+                self._build_usage_metadata(
+                    provider=provider,
+                    model=model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    output_text=response,
+                    usage=usage,
+                    latency_ms=latency_ms,
+                    cost_method="provider_usage" if usage else "heuristic_tokens",
+                )
+            )
+            logger.debug(
+                "llm_call_success",
+                extra={
+                    "provider": provider,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "estimated_cost_usd": self._last_call_metadata.get("estimated_cost_usd", 0.0),
+                    "cost_method": self._last_call_metadata.get("cost_method", ""),
+                },
+            )
+            return response
         except Exception as e:
             message = str(e)
             error_type = "provider_error"
@@ -102,6 +264,30 @@ class LLMClient:
             if "rate limit" in message.lower() or "rate_limit" in message.lower():
                 error_type = "rate_limit"
                 fix = "This model hit a quota or rate limit. Retry later or fall back to a cheaper/local model."
+            latency_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            self._set_last_call_metadata(
+                {
+                    "provider": provider,
+                    "model": model,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0.0,
+                    "cost_method": "provider_error",
+                    "cached": False,
+                    "latency_ms": latency_ms,
+                    "error_type": error_type,
+                }
+            )
+            logger.warning(
+                "llm_call_failed",
+                extra={
+                    "provider": provider,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "error_type": error_type,
+                },
+            )
             return self._error_payload(provider, model, message, "LLM call failed", fix, error_type=error_type)
 
     # ── OpenAI ────────────────────────────────────────────────
@@ -112,7 +298,7 @@ class LLMClient:
         user_prompt: str,
         force_json: bool,
         temperature: float,
-    ) -> str:
+    ) -> tuple[str, dict]:
         client = self._get_openai()
         params = {
             "model": model,
@@ -125,7 +311,12 @@ class LLMClient:
         if force_json:
             params["response_format"] = {"type": "json_object"}
         response = client.chat.completions.create(**params)
-        return response.choices[0].message.content
+        usage_obj = getattr(response, "usage", None)
+        usage = {
+            "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) if usage_obj else 0,
+            "completion_tokens": getattr(usage_obj, "completion_tokens", 0) if usage_obj else 0,
+        }
+        return response.choices[0].message.content, usage
 
     # ── Groq ──────────────────────────────────────────────────
     def _call_groq(
@@ -134,7 +325,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
-    ) -> str:
+    ) -> tuple[str, dict]:
         client = self._get_groq()
         try:
             response = client.chat.completions.create(
@@ -145,7 +336,12 @@ class LLMClient:
                 ],
                 temperature=temperature,
             )
-            return response.choices[0].message.content
+            usage_obj = getattr(response, "usage", None)
+            usage = {
+                "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) if usage_obj else 0,
+                "completion_tokens": getattr(usage_obj, "completion_tokens", 0) if usage_obj else 0,
+            }
+            return response.choices[0].message.content, usage
         except Exception as exc:
             message = str(exc)
             fix = "Check Groq API key and runtime environment."
@@ -157,7 +353,7 @@ class LLMClient:
             if "model_decommissioned" in message or "decommissioned" in message.lower():
                 error_type = "model_decommissioned"
                 fix = "Replace the deprecated Groq model with a currently supported one, such as llama-3.3-70b-versatile."
-            return self._error_payload("groq", model, message, "Groq API error", fix, error_type=error_type)
+            return self._error_payload("groq", model, message, "Groq API error", fix, error_type=error_type), {}
 
     # ── Gemini ────────────────────────────────────────────────
     def _call_gemini(
@@ -166,7 +362,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
-    ) -> str:
+    ) -> tuple[str, dict]:
         api_key = os.getenv("GEMINI_API_KEY")
         clean_model = model.split("/")[-1]
         url = (
@@ -202,7 +398,7 @@ class LLMClient:
             error_msg = res_json.get("error", {}).get("message", body or "Unknown Gemini error")
             error_type = "rate_limit" if ("rate limit" in error_msg.lower() or "quota" in error_msg.lower()) else "provider_error"
             fix = "Check Gemini API key or quota." if error_type == "rate_limit" else "Check Gemini API key or request format."
-            return self._error_payload("gemini", model, error_msg, "Gemini API error", fix, error_type=error_type)
+            return self._error_payload("gemini", model, error_msg, "Gemini API error", fix, error_type=error_type), {}
         except Exception as exc:
             return self._error_payload(
                 "gemini",
@@ -211,9 +407,14 @@ class LLMClient:
                 "Gemini API error",
                 "Check Gemini API key, network, or runtime environment.",
                 error_type="provider_error",
-            )
+            ), {}
 
-        return res_json["candidates"][0]["content"]["parts"][0]["text"]
+        usage_metadata = res_json.get("usageMetadata", {}) or {}
+        usage = {
+            "prompt_tokens": usage_metadata.get("promptTokenCount", 0),
+            "completion_tokens": usage_metadata.get("candidatesTokenCount", 0),
+        }
+        return res_json["candidates"][0]["content"]["parts"][0]["text"], usage
 
     # ── Ollama ───────────────────────────────────────────────
     def _call_anthropic(
@@ -222,7 +423,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
-    ) -> str:
+    ) -> tuple[str, dict]:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             return self._error_payload(
@@ -232,7 +433,7 @@ class LLMClient:
                 "Anthropic API error",
                 "Add ANTHROPIC_API_KEY to your .env before using Claude models.",
                 error_type="provider_error",
-            )
+            ), {}
 
         url = "https://api.anthropic.com/v1/messages"
         payload = {
@@ -274,7 +475,7 @@ class LLMClient:
                 if error_type == "rate_limit"
                 else "Check ANTHROPIC_API_KEY and Anthropic request format."
             )
-            return self._error_payload("anthropic", model, error_msg, "Anthropic API error", fix, error_type=error_type)
+            return self._error_payload("anthropic", model, error_msg, "Anthropic API error", fix, error_type=error_type), {}
         except Exception as exc:
             return self._error_payload(
                 "anthropic",
@@ -283,7 +484,7 @@ class LLMClient:
                 "Anthropic API error",
                 "Check ANTHROPIC_API_KEY, network, or Anthropic runtime availability.",
                 error_type="provider_error",
-            )
+            ), {}
 
         parts = res_json.get("content", [])
         text_parts = [
@@ -292,7 +493,12 @@ class LLMClient:
             if isinstance(part, dict) and part.get("type") == "text"
         ]
         if text_parts:
-            return "\n".join(part for part in text_parts if part)
+            usage_obj = res_json.get("usage", {}) or {}
+            usage = {
+                "prompt_tokens": usage_obj.get("input_tokens", 0),
+                "completion_tokens": usage_obj.get("output_tokens", 0),
+            }
+            return "\n".join(part for part in text_parts if part), usage
         return self._error_payload(
             "anthropic",
             model,
@@ -300,7 +506,7 @@ class LLMClient:
             "Anthropic API error",
             "Anthropic returned an unexpected response payload.",
             error_type="provider_error",
-        )
+        ), {}
 
     # ── Ollama ───────────────────────────────────────────────
     def _call_ollama(
@@ -309,7 +515,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
-    ) -> str:
+    ) -> tuple[str, dict]:
         clean_model = model.split("ollama:", 1)[-1] if model.startswith("ollama:") else model
         url = f"{self._ollama_base_url}/api/generate"
         payload = {
@@ -347,7 +553,7 @@ class LLMClient:
                 "Ollama API error",
                 "Make sure `ollama serve` is running and the selected model is pulled locally.",
                 error_type=error_type,
-            )
+            ), {}
         except Exception as exc:
             return self._error_payload(
                 "ollama",
@@ -356,10 +562,14 @@ class LLMClient:
                 "Ollama API error",
                 "Make sure the Ollama app/server is running locally on http://127.0.0.1:11434.",
                 error_type="provider_error",
-            )
+            ), {}
 
         if "response" in res_json:
-            return res_json["response"]
+            usage = {
+                "prompt_tokens": res_json.get("prompt_eval_count", 0),
+                "completion_tokens": res_json.get("eval_count", 0),
+            }
+            return res_json["response"], usage
         return self._error_payload(
             "ollama",
             model,
@@ -367,7 +577,7 @@ class LLMClient:
             "Ollama API error",
             "Ollama returned an unexpected response payload.",
             error_type="provider_error",
-        )
+        ), {}
 
 
 # Singleton

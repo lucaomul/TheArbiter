@@ -14,8 +14,14 @@ from arbiter.app.ui_styles import UI_CSS
 from arbiter.core.orchestrator import ArbiterOrchestrator
 from arbiter.config.settings import TASK_PROFILES
 from arbiter.infra.model_selector import get_model_selector
+from arbiter.infra.plugin_registry import get_plugin_registry
 
 load_dotenv(PROJECT_ROOT / ".env")
+REGISTRY = get_plugin_registry()
+try:
+    REGISTRY.sync_catalog_if_needed()
+except Exception:
+    pass
 
 st.set_page_config(
     page_title="Arbiter Test Bench",
@@ -108,7 +114,23 @@ def render_result(result):
         st.json(result.iteration_history)
 
     with st.expander("Debug Info"):
-        st.json(result.debug_info)
+            st.json(result.debug_info)
+
+
+def available_models(role: str) -> list[str]:
+    models = [plugin.model_id for plugin in REGISTRY.candidates_for_role(role)]
+    return models or [plugin.model_id for plugin in REGISTRY.candidates_for_role(role, enabled_only=False)]
+
+
+def normalize_role_model(role: str, model_id: str) -> str:
+    resolved = REGISTRY.resolve_model_id(model_id)
+    if REGISTRY.is_selectable(resolved, role):
+        return resolved
+    replacement = REGISTRY.recommended_replacement(resolved, role)
+    if replacement:
+        return replacement
+    options = available_models(role)
+    return options[0] if options else resolved
 
 
 with st.sidebar:
@@ -153,23 +175,28 @@ with st.sidebar:
         logic_model = f"ollama:{logic_model_name.strip()}" if logic_model_name.strip() else "ollama:llama3.1:8b"
         janitor_model = f"ollama:{janitor_model_name.strip()}" if janitor_model_name.strip() else "ollama:llama3.1:8b"
     else:
-        architect_model = st.selectbox("Architect", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gpt-4o", "gpt-4o-mini"])
-        auditor_model = st.selectbox("Auditor", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemini-2.5-flash", "gemini-2.5-pro"])
-        tech_model = st.selectbox("Tech Critic", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemini-2.5-flash", "gemini-2.5-pro"])
-        logic_model = st.selectbox("Logic Critic", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemini-2.5-flash"])
-        janitor_model = "llama-3.1-8b-instant"
+        architect_options = available_models("Architect")
+        auditor_options = available_models("Auditor")
+        tech_options = available_models("Tech Critic")
+        logic_options = available_models("Logic Critic")
+        janitor_options = available_models("Janitor")
+        architect_model = st.selectbox("Architect", architect_options, index=0)
+        auditor_model = st.selectbox("Auditor", auditor_options, index=0)
+        tech_model = st.selectbox("Tech Critic", tech_options, index=0)
+        logic_model = st.selectbox("Logic Critic", logic_options, index=0)
+        janitor_model = janitor_options[0] if janitor_options else "llama-3.1-8b-instant"
     auto_mode = st.checkbox("Autonomous Mode", value=False)
     target_score = st.slider("Target Score", 6, 10, 8) if auto_mode else 8
     max_iterations = st.number_input("Max Iterations", 1, 8, 3) if auto_mode else 1
 
     selector = get_model_selector()
     selector.set_provider_lock("" if provider_lock == "mixed" else provider_lock)
-    selector.set_override("Architect", architect_model)
-    selector.set_override("Auditor", auditor_model)
-    selector.set_override("Tech Critic", tech_model)
-    selector.set_override("Logic Critic", logic_model)
-    selector.set_override("Janitor", janitor_model)
-    selector.set_override("Repair", janitor_model if use_ollama_test_mode else "llama-3.1-8b-instant")
+    selector.set_override("Architect", normalize_role_model("Architect", architect_model))
+    selector.set_override("Auditor", normalize_role_model("Auditor", auditor_model))
+    selector.set_override("Tech Critic", normalize_role_model("Tech Critic", tech_model))
+    selector.set_override("Logic Critic", normalize_role_model("Logic Critic", logic_model))
+    selector.set_override("Janitor", normalize_role_model("Janitor", janitor_model))
+    selector.set_override("Repair", normalize_role_model("Repair", janitor_model if use_ollama_test_mode else "llama-3.1-8b-instant"))
 
 st.markdown(
     "<h1 style='text-align:center;letter-spacing:10px;'>ARBITER <span style='color:#00ffa3;'>TEST BENCH</span></h1>",

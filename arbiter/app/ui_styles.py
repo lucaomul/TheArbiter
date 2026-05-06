@@ -407,6 +407,7 @@ span {
     box-shadow: var(--shadow);
     padding: 14px 16px;
     min-height: 96px;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -420,7 +421,7 @@ span {
     line-height: 1.35;
     margin-bottom: 8px;
     word-break: normal;
-    overflow-wrap: normal;
+    overflow-wrap: anywhere;
     hyphens: none;
 }
 
@@ -430,7 +431,7 @@ span {
     font-size: clamp(1rem, 1.3vw, 1.25rem);
     line-height: 1.15;
     word-break: normal;
-    overflow-wrap: break-word;
+    overflow-wrap: anywhere;
     hyphens: none;
 }
 
@@ -713,6 +714,7 @@ span {
     letter-spacing: 0.08em;
     text-transform: uppercase;
     white-space: nowrap;
+    overflow-wrap: anywhere;
 }
 
 .cost-value {
@@ -720,6 +722,7 @@ span {
     color: #ffffff;
     font-weight: 700;
     margin-bottom: 10px;
+    overflow-wrap: anywhere;
 }
 
 .iter-bar {
@@ -733,25 +736,41 @@ span {
 }
 
 .luca-branding {
+    margin-top: 24px;
     padding: 16px;
     border-radius: 16px;
     background: rgba(255,255,255,0.05);
     border: 1px solid rgba(255,255,255,0.08);
-    text-align: center;
-    margin-top: 24px;
+    text-align: left;
 }
 
 .luca-name {
     font-weight: 700;
     color: #ffffff;
     font-size: 0.82rem;
+    line-height: 1.35;
+}
+
+.luca-links-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
+.luca-meta {
+    font-size: 0.68rem;
+    color: #9fb0c5;
+    margin-top: 10px;
+    line-height: 1.4;
 }
 
 .luca-link {
     color: #d5dfeb;
     text-decoration: none;
     font-size: 0.72rem;
-    margin: 0 8px;
+    margin: 0;
 }
 
 .luca-link:hover {
@@ -773,6 +792,181 @@ span {
     letter-spacing: 0.08em;
     color: var(--text-soft);
     margin-bottom: 8px;
+}
+
+.visual-blueprint {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    padding: 18px 18px 20px;
+    box-shadow: var(--shadow);
+    margin: 10px 0 24px;
+    animation: fade-rise 0.34s ease both;
+}
+
+.visual-blueprint-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+}
+
+.visual-eyebrow {
+    color: var(--text-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.68rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.visual-title {
+    color: var(--title);
+    font-size: 1.08rem;
+    font-weight: 800;
+    line-height: 1.25;
+}
+
+.visual-subtitle {
+    color: var(--text-soft);
+    font-size: 0.88rem;
+    line-height: 1.55;
+    margin-top: 6px;
+    max-width: 760px;
+}
+
+.visual-mode-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 32px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: #111111;
+    color: #ffffff;
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.visual-node-lane {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(152px, 1fr));
+    gap: 12px;
+    margin: 16px 0 14px;
+}
+
+.visual-node {
+    position: relative;
+    background: linear-gradient(180deg, #fbfbfa 0%, #f4f4f1 100%);
+    border: 1px solid #e0e0db;
+    border-radius: 18px;
+    padding: 14px 14px 16px;
+    min-height: 132px;
+    overflow: hidden;
+}
+
+.visual-node::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+    height: 2px;
+    background: rgba(17, 17, 17, 0.08);
+}
+
+.visual-node-index {
+    color: var(--text-soft);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+}
+
+.visual-node-label {
+    color: var(--title);
+    font-size: 0.92rem;
+    font-weight: 800;
+    line-height: 1.35;
+    margin-bottom: 8px;
+}
+
+.visual-node-note {
+    color: var(--text-soft);
+    font-size: 0.82rem;
+    line-height: 1.55;
+}
+
+.visual-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.visual-detail-card {
+    background: var(--surface-soft);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 14px 14px 16px;
+}
+
+.visual-detail-label {
+    color: var(--text-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.68rem;
+    font-weight: 700;
+    margin-bottom: 10px;
+}
+
+.visual-detail-body {
+    color: var(--text);
+}
+
+.visual-metric-row + .visual-metric-row {
+    margin-top: 10px;
+}
+
+.visual-metric-label {
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.visual-metric-bar {
+    width: 100%;
+    height: 10px;
+    border-radius: 999px;
+    background: #e7e7e2;
+    overflow: hidden;
+}
+
+.visual-metric-bar span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #111111 0%, #555555 100%);
+}
+
+.visual-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: #efefeb;
+    border: 1px solid #dbdbd5;
+    color: var(--text);
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin: 0 8px 8px 0;
+}
+
+.visual-empty {
+    color: var(--text-soft);
+    font-size: 0.84rem;
+    line-height: 1.55;
 }
 
 .lab-card-text {

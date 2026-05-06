@@ -3,7 +3,6 @@ from arbiter.models.result import ArbiterResult
 from arbiter.core.agent_runner import AgentRunner
 from arbiter.core.iteration_engine import IterationEngine
 from arbiter.prompts.registry import PromptRegistry
-from arbiter.config.settings import PRICES
 
 
 class ArbiterOrchestrator:
@@ -71,8 +70,8 @@ class ArbiterOrchestrator:
         # ── 2. Audit (optional — skip if already clarified) ───
         if not clarification:
             audit_result, audit_model = self._run_audit(runner, state.current_task)
-            state.track_cost("Auditor", PRICES.get(audit_model, 0.001))
-            state.record_model_usage("Auditor", audit_model)
+            state.track_cost("Auditor", runner.latest_call_cost("Auditor", audit_model))
+            state.record_model_usage("Auditor", audit_model, runner.latest_call_metadata("Auditor"))
 
             if not audit_result.get("clear", True):
                 # Surface questions to caller — caller decides what to do
