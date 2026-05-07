@@ -46,6 +46,8 @@ def _iterations_from_result(result) -> list[IterationSchema]:
 
 def _build_response(result, fallback_run_id: str) -> RunResponse:
     run_id = str(result.debug_info.get("run_id", "") or fallback_run_id)
+    team_meta = dict(result.debug_info.get("software_team", {}) or {})
+    evidence_meta = dict(result.debug_info.get("evidence", {}) or {})
     return RunResponse(
         run_id=run_id,
         status=_status_from_result(result),
@@ -56,6 +58,23 @@ def _build_response(result, fallback_run_id: str) -> RunResponse:
         total_cost_usd=float((result.costs or {}).get("Total", 0.0) or 0.0),
         needs_clarification=bool(result.debug_info.get("needs_clarification", False)),
         clarification_questions=list(result.debug_info.get("questions", []) or []),
+        team_mode_used=bool(team_meta.get("use_team")) if team_meta else None,
+        team_recommended=bool(team_meta.get("recommended")) if team_meta else None,
+        team_approval_missing=bool(team_meta.get("approval_missing")) if team_meta else None,
+        team_profile=str(team_meta.get("selected_profile", "") or "") or None,
+        team_profile_label=str(team_meta.get("selected_profile_label", "") or "") or None,
+        team_roles=list(team_meta.get("roles", []) or []),
+        detected_domains=list(team_meta.get("detected_domains", []) or []),
+        detected_technologies=list(team_meta.get("detected_technologies", []) or []),
+        team_signal_reasons=list(team_meta.get("signal_reasons", []) or []),
+        team_complexity_level=str(team_meta.get("complexity_level", "") or "") or None,
+        team_estimated_cost_multiplier=float(team_meta.get("estimated_cost_multiplier", 0.0) or 0.0) or None,
+        team_estimated_latency_multiplier=float(team_meta.get("estimated_latency_multiplier", 0.0) or 0.0) or None,
+        architecture_summary=str(team_meta.get("architecture_summary", "") or "") or None,
+        evidence_source_count=int(evidence_meta.get("source_count", 0) or 0) if evidence_meta else None,
+        evidence_source_names=list(evidence_meta.get("source_names", []) or []),
+        evidence_warning_count=int(evidence_meta.get("warning_count", 0) or 0) if evidence_meta else None,
+        evidence_rag_used=bool(evidence_meta.get("rag_used")) if evidence_meta else None,
     )
 
 
@@ -80,6 +99,23 @@ async def _persist_clarification_run(response: RunResponse, payload: RunRequest)
                 "clarification": payload.clarification,
                 "manual_override": payload.manual_override,
                 "stable_mode": payload.stable_mode,
+                "team_mode_used": response.team_mode_used,
+                "team_recommended": response.team_recommended,
+                "team_approval_missing": response.team_approval_missing,
+                "team_profile": response.team_profile,
+                "team_profile_label": response.team_profile_label,
+                "team_roles": list(response.team_roles or []),
+                "detected_domains": list(response.detected_domains or []),
+                "detected_technologies": list(response.detected_technologies or []),
+                "team_signal_reasons": list(response.team_signal_reasons or []),
+                "team_complexity_level": response.team_complexity_level,
+                "team_estimated_cost_multiplier": response.team_estimated_cost_multiplier,
+                "team_estimated_latency_multiplier": response.team_estimated_latency_multiplier,
+                "architecture_summary": response.architecture_summary or "",
+                "evidence_source_count": response.evidence_source_count,
+                "evidence_source_names": list(response.evidence_source_names or []),
+                "evidence_warning_count": response.evidence_warning_count,
+                "evidence_rag_used": response.evidence_rag_used,
             },
         }
     )
@@ -109,6 +145,10 @@ async def create_run(payload: RunRequest) -> RunResponse:
             payload.user_input,
             clarification=payload.clarification,
             manual_override=payload.manual_override,
+            allow_complex_software_team=payload.allow_complex_software_team,
+            software_team_profile=payload.software_team_profile,
+            supporting_materials=[item.model_dump() for item in payload.supporting_materials],
+            supporting_urls=list(payload.supporting_urls or []),
         )
     except HTTPException:
         raise
@@ -189,4 +229,21 @@ async def get_run(run_id: str) -> RunResponse:
         total_cost_usd=float(run.get("total_cost_usd", 0.0) or 0.0),
         needs_clarification=bool(questions),
         clarification_questions=questions,
+        team_mode_used=metadata.get("team_mode_used"),
+        team_recommended=metadata.get("team_recommended"),
+        team_approval_missing=metadata.get("team_approval_missing"),
+        team_profile=metadata.get("team_profile"),
+        team_profile_label=metadata.get("team_profile_label"),
+        team_roles=list(metadata.get("team_roles", []) or []),
+        detected_domains=list(metadata.get("detected_domains", []) or []),
+        detected_technologies=list(metadata.get("detected_technologies", []) or []),
+        team_signal_reasons=list(metadata.get("team_signal_reasons", []) or []),
+        team_complexity_level=str(metadata.get("team_complexity_level", "") or "") or None,
+        team_estimated_cost_multiplier=metadata.get("team_estimated_cost_multiplier"),
+        team_estimated_latency_multiplier=metadata.get("team_estimated_latency_multiplier"),
+        architecture_summary=str(metadata.get("architecture_summary", "") or "") or None,
+        evidence_source_count=metadata.get("evidence_source_count"),
+        evidence_source_names=list(metadata.get("evidence_source_names", []) or []),
+        evidence_warning_count=metadata.get("evidence_warning_count"),
+        evidence_rag_used=metadata.get("evidence_rag_used"),
     )

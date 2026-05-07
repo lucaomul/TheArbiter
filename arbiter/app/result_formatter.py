@@ -39,10 +39,18 @@ class ResultFormatter:
 """
         tech_issues = t_res.get("issues", [])
         logic_issues = l_res.get("issues", [])
+        tech_defects = t_res.get("confirmed_defects", [])
+        logic_defects = l_res.get("confirmed_defects", [])
+        tech_risks = t_res.get("risks", [])
+        logic_risks = l_res.get("risks", [])
         tech_contract = t_res.get("repair_contract", [])
         logic_contract = l_res.get("repair_contract", [])
         tech_issue_block = ""
         logic_issue_block = ""
+        tech_defect_block = ""
+        logic_defect_block = ""
+        tech_risk_block = ""
+        logic_risk_block = ""
         if tech_issues:
             tech_issue_block = "<br><b style='color:#7fffd0;'>Full Technical Findings:</b><br>" + "<br>".join(
                 f"• {issue}" for issue in tech_issues
@@ -50,6 +58,22 @@ class ResultFormatter:
         if logic_issues:
             logic_issue_block = "<br><b style='color:#7fffd0;'>Full Logic Findings:</b><br>" + "<br>".join(
                 f"• {issue}" for issue in logic_issues
+            )
+        if tech_defects:
+            tech_defect_block = "<br><b style='color:#7fffd0;'>Confirmed Technical Defects:</b><br>" + "<br>".join(
+                f"• {item}" for item in tech_defects[:4]
+            )
+        if logic_defects:
+            logic_defect_block = "<br><b style='color:#7fffd0;'>Confirmed Logic Defects:</b><br>" + "<br>".join(
+                f"• {item}" for item in logic_defects[:4]
+            )
+        if tech_risks:
+            tech_risk_block = "<br><b style='color:#7fffd0;'>Technical Risks:</b><br>" + "<br>".join(
+                f"• {item}" for item in tech_risks[:3]
+            )
+        if logic_risks:
+            logic_risk_block = "<br><b style='color:#7fffd0;'>Logic Risks:</b><br>" + "<br>".join(
+                f"• {item}" for item in logic_risks[:3]
             )
         repair_contract_block = ""
         if tech_contract or logic_contract:
@@ -65,8 +89,8 @@ class ResultFormatter:
 <div class="score-badge {badge_cls}">
     {score_line}
 </div><br>
-<b style='color:#00ffa3;'>Technical Audit:</b> {t_res.get('critique', 'No issues.')}{tech_issue_block}<br><br>
-<b style='color:#00ffa3;'>Logic Audit:</b> {l_res.get('critique', 'No issues.')}{logic_issue_block}<br>
+<b style='color:#00ffa3;'>Technical Audit:</b> {t_res.get('critique', 'No issues.')}{tech_defect_block}{tech_risk_block}{tech_issue_block}<br><br>
+<b style='color:#00ffa3;'>Logic Audit:</b> {l_res.get('critique', 'No issues.')}{logic_defect_block}{logic_risk_block}{logic_issue_block}<br>
 <div style='background:rgba(0,255,163,0.05);padding:12px;border-radius:8px;
             margin-top:15px;border-left:3px solid #00ffa3;'>
     <b>FIX PRIORITY:</b><br>

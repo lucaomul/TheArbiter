@@ -1,6 +1,7 @@
 import pytest
 
 from arbiter.core.final_verifier import FinalVerifier
+from arbiter.models.evidence import EvidenceBundle, EvidenceSource
 
 
 PYTHON_SOLUTION = """```python
@@ -96,6 +97,170 @@ def test_verifier_marks_malformed_json_as_caution_when_requested():
 
     json_check = next(item for item in result.checks if item["name"] == "expected_json_output")
     assert json_check["status"] == "caution"
+
+
+def test_verifier_marks_unsupported_external_statistics_as_caution():
+    solution = (
+        "According to industry average data, 68% of dental clinics switch vendors within 90 days, "
+        "and the market is worth $4.2 billion. Audience: dental clinics. Offer: automation."
+    )
+    result = FinalVerifier().verify(
+        "Marketing & Growth",
+        "Create a go-to-market plan for a dental SaaS.",
+        solution,
+    )
+
+    grounding = next(item for item in result.checks if item["name"] == "grounding_discipline")
+    assert grounding["status"] == "caution"
+
+
+def test_verifier_allows_labeled_illustrative_targets():
+    solution = (
+        "Audience: independent clinics. Offer: recall automation. Channel: outbound email. CTA: book a demo. "
+        "Assumption: illustrative target CAC is $250 during the first 30 days while the team tunes messaging."
+    )
+    result = FinalVerifier().verify(
+        "Marketing & Growth",
+        "Create a go-to-market plan for a dental SaaS.",
+        solution,
+    )
+
+    grounding = next(item for item in result.checks if item["name"] == "grounding_discipline")
+    assert grounding["status"] == "pass"
+
+
+def test_verifier_marks_missing_requested_sources_as_caution():
+    result = FinalVerifier().verify(
+        "General Problem Solving",
+        "Recommend how agencies should use AI in client delivery, with sources.",
+        "Recommendation: start with internal QA workflows, then widen usage carefully.",
+    )
+
+    source_check = next(item for item in result.checks if item["name"] == "expected_sources")
+    assert source_check["status"] == "caution"
+
+
+def test_verifier_accepts_explicit_sources_when_requested():
+    result = FinalVerifier().verify(
+        "General Problem Solving",
+        "Recommend how agencies should use AI in client delivery, with sources.",
+        (
+            "Recommendation: start with internal QA workflows, then widen usage carefully.\n\n"
+            "Sources:\n"
+            "- https://example.com/agency-ai-report\n"
+            "- https://example.com/ops-reliability-study"
+        ),
+    )
+
+    source_check = next(item for item in result.checks if item["name"] == "expected_sources")
+    assert source_check["status"] == "pass"
+
+
+def test_verifier_accepts_attached_source_name_as_source_marker():
+    evidence = EvidenceBundle(
+        query="Use the attached source.",
+        sources=[
+            EvidenceSource(
+                source_id="src-1",
+                name="customer-brief.docx",
+                source_type="file",
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                extracted_text="The rollout should begin with governance and staged deployment.",
+            )
+        ],
+    )
+    result = FinalVerifier().verify(
+        "General Problem Solving",
+        "Recommend how agencies should use AI in client delivery, with sources.",
+        "Recommendation: begin with internal QA workflows. [Source: customer-brief.docx]",
+        evidence_bundle=evidence,
+    )
+
+    source_check = next(item for item in result.checks if item["name"] == "expected_sources")
+    assert source_check["status"] == "pass"
+
+
+def test_verifier_marks_missing_requested_quotes_as_caution():
+    result = FinalVerifier().verify(
+        "Writing & Content",
+        "Write a short note about responsible AI adoption with two direct quotes and sources.",
+        (
+            "Responsible adoption should start with governance and rollout discipline.\n\n"
+            "Sources:\n- https://example.com/report"
+        ),
+    )
+
+    quote_check = next(item for item in result.checks if item["name"] == "expected_quotes")
+    assert quote_check["status"] == "caution"
+
+
+def test_verifier_accepts_explicit_quotes_when_requested():
+    result = FinalVerifier().verify(
+        "Writing & Content",
+        "Write a short note about responsible AI adoption with two direct quotes and sources.",
+        (
+            "\"Reliability comes before scale when teams are still learning where AI fails.\" — Example Report\n"
+            "\"Operational discipline is what turns AI experiments into repeatable systems.\" — Example Study\n\n"
+            "Sources:\n- https://example.com/report\n- https://example.com/study"
+        ),
+    )
+
+    quote_check = next(item for item in result.checks if item["name"] == "expected_quotes")
+    assert quote_check["status"] == "pass"
+
+
+def test_verifier_checks_quotes_against_attached_source_material():
+    evidence = EvidenceBundle(
+        query="Quote the source",
+        sources=[
+            EvidenceSource(
+                source_id="src-1",
+                name="report.pdf",
+                source_type="file",
+                media_type="application/pdf",
+                extracted_text=(
+                    "Reliability comes before scale when teams are still learning where AI fails. "
+                    "Operational discipline turns experiments into repeatable systems."
+                ),
+            )
+        ],
+    )
+    result = FinalVerifier().verify(
+        "Writing & Content",
+        "Write a short note about responsible AI adoption with two direct quotes and sources.",
+        (
+            "\"Reliability comes before scale when teams are still learning where AI fails.\" [Source: report.pdf]\n"
+            "\"Operational discipline turns experiments into repeatable systems.\" [Source: report.pdf]"
+        ),
+        evidence_bundle=evidence,
+    )
+
+    quote_check = next(item for item in result.checks if item["name"] == "expected_quotes")
+    assert quote_check["status"] == "pass"
+
+
+def test_verifier_marks_unmatched_quotes_from_attached_sources_as_caution():
+    evidence = EvidenceBundle(
+        query="Quote the source",
+        sources=[
+            EvidenceSource(
+                source_id="src-1",
+                name="report.pdf",
+                source_type="file",
+                media_type="application/pdf",
+                extracted_text="Reliability comes before scale when teams are still learning where AI fails.",
+            )
+        ],
+    )
+    result = FinalVerifier().verify(
+        "Writing & Content",
+        "Write a short note about responsible AI adoption with two direct quotes and sources.",
+        "\"A completely different claim that is not in the report.\" [Source: report.pdf]",
+        evidence_bundle=evidence,
+    )
+
+    quote_check = next(item for item in result.checks if item["name"] == "expected_quotes")
+    assert quote_check["status"] == "caution"
 
 
 def test_verifier_executes_standalone_sql_when_requested():

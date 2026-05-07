@@ -2,6 +2,14 @@ import html
 import re
 from dataclasses import dataclass
 
+from arbiter.core.grounding import (
+    find_unsupported_external_claims,
+    response_has_quotes,
+    response_has_sources,
+    task_expects_quotes,
+    task_expects_sources,
+)
+
 
 @dataclass
 class PreflightResult:
@@ -60,6 +68,24 @@ class PreflightValidator:
             issues.extend(self._validate_planning(task_text, raw, explicit_code_request))
         elif validator_type == "general":
             issues.extend(self._validate_general(task_text, raw, explicit_code_request))
+
+        if validator_type != "software" and not explicit_code_request:
+            unsupported_claims = find_unsupported_external_claims(task_text, raw, max_samples=2)
+            if unsupported_claims:
+                issues.append(
+                    "The response presents precise external facts or statistics without a cited source or clearly labeled assumption. "
+                    f"Examples: {' | '.join(unsupported_claims)}"
+                )
+
+        if task_expects_sources(task_text) and not response_has_sources(raw):
+            issues.append(
+                "The task explicitly asked for sources or citations, but the response did not include clear source markers or reference links."
+            )
+
+        if task_expects_quotes(task_text) and not response_has_quotes(raw):
+            issues.append(
+                "The task explicitly asked for direct quotes or quoted evidence, but the response did not include clear quote markers."
+            )
 
         # Deduplicate while preserving order
         deduped = []

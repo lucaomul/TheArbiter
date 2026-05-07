@@ -99,6 +99,14 @@ def fallback_runs(limit: int = 300) -> list[dict]:
                     "benchmark_pack": item.get("benchmark_pack", ""),
                     "benchmark_case_id": item.get("benchmark_case_id", ""),
                     "benchmark_case_title": item.get("benchmark_case_title", ""),
+                    "expected_team_mode": item.get("team_mode_expected"),
+                    "team_mode_recommended": item.get("team_mode_recommended"),
+                    "team_mode_used": item.get("team_mode_used"),
+                    "team_approval_missing": item.get("team_approval_missing"),
+                    "team_complexity_score": item.get("team_complexity_score", 0),
+                    "team_complexity_level": item.get("team_complexity_level", ""),
+                    "team_detected_domains": item.get("team_detected_domains", []),
+                    "team_roles": item.get("team_roles", []),
                 },
             }
         )
@@ -271,6 +279,33 @@ def benchmark_strategy_rows(runs: list[dict]) -> list[dict]:
             }
         )
     return sorted(rows, key=lambda item: (-item["runs"], item["strategy"]))
+
+
+def team_routing_rows(runs: list[dict]) -> list[dict]:
+    rows = []
+    for run in runs:
+        metadata = dict(run.get("run_metadata", {}) or {})
+        expected = metadata.get("expected_team_mode")
+        recommended = metadata.get("team_mode_recommended")
+        used = metadata.get("team_mode_used")
+        if expected is None and recommended is None and used is None:
+            continue
+        match = expected is None or bool(expected) == bool(recommended)
+        rows.append(
+            {
+                "case": metadata.get("benchmark_case_title") or metadata.get("benchmark_case_id") or run.get("id", ""),
+                "expected": expected,
+                "recommended": recommended,
+                "used": used,
+                "approval_missing": metadata.get("team_approval_missing"),
+                "complexity_score": metadata.get("team_complexity_score", 0),
+                "complexity_level": metadata.get("team_complexity_level", ""),
+                "domains": ", ".join(metadata.get("team_detected_domains", []) or []),
+                "roles": ", ".join(metadata.get("team_roles", []) or []),
+                "match": match,
+            }
+        )
+    return rows
 
 
 def model_comparison_rows(runs: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -646,6 +681,22 @@ with benchmarks_tab:
     else:
         st.caption("No benchmark strategy labels are available yet.")
 
+    routing_rows = team_routing_rows(runs)
+    st.markdown("#### Software Team Routing")
+    if routing_rows:
+        matched = sum(1 for row in routing_rows if row["match"])
+        summary_cards(
+            [
+                ("Cases", len(routing_rows)),
+                ("Matched", matched),
+                ("Mismatched", len(routing_rows) - matched),
+                ("Team Used", sum(1 for row in routing_rows if row["used"])),
+            ]
+        )
+        st.dataframe(routing_rows, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No software-team routing benchmark data is available yet.")
+
     readiness_breakdown = {}
     for run in runs:
         readiness = str(run.get("ship_readiness", "UNASSESSED") or "UNASSESSED")
@@ -686,6 +737,18 @@ with system_tab:
             ("Memory Backend", memory_stats.get("backend", "native")),
             ("Eval Fixtures", count_eval_fixtures()),
         ]
+    )
+    st.markdown("#### Benchmark Store Status")
+    st.dataframe(
+        [
+            {
+                "store_path": benchmark_stats.get("store_path", "unknown"),
+                "fallback_in_use": bool(benchmark_stats.get("fallback_in_use", False)),
+                "last_error": benchmark_stats.get("last_error", ""),
+            }
+        ],
+        use_container_width=True,
+        hide_index=True,
     )
     provider_rows = provider_catalog_rows(registry)
     if provider_rows:

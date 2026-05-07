@@ -9,6 +9,8 @@ from arbiter.agents.base_agent import (
     JanitorAgent,
     RepairAgent,
 )
+from arbiter.agents.software_team import SoftwareTeamAgent
+from arbiter.models.team import SpecialistPlan
 from arbiter.prompts.registry import PromptRegistry
 from arbiter.infra.model_selector import get_model_selector
 from arbiter.infra.performance_store import get_performance_store
@@ -159,6 +161,107 @@ class AgentRunner:
                 return result, model
             self._handle_provider_error(model, result)
         return result, attempted[-1] if attempted else ""
+
+    def run_specialist(
+        self,
+        role: str,
+        task: str,
+        history: str = "",
+        context: dict = None,
+        selection_role: str = "Architect",
+    ) -> tuple[str, str]:
+        prompt = self.registry.get(role)
+        attempted = []
+        last_solution = ""
+        for model in self._candidate_models(selection_role, context):
+            attempted.append(model)
+            agent = ArchitectAgent(model=model, system_prompt=prompt)
+            solution = agent.generate(task, history=history)
+            self._capture_call_metadata(role, agent)
+            llm_result = agent.last_result()
+            if not llm_result or llm_result.success:
+                logger.info(
+                    "specialist_completed",
+                    extra={
+                        "iteration": self.current_iteration,
+                        "agent_name": role,
+                        "model": model,
+                        "provider": provider_for_model(model, ""),
+                    },
+                )
+                return solution, model
+            error_payload = BaseAgent.error_payload(solution, llm_result=llm_result) or {}
+            self._handle_provider_error(model, error_payload)
+            last_solution = solution
+        return last_solution, attempted[-1] if attempted else ""
+
+    def run_software_specialist(
+        self,
+        role: str,
+        task: str,
+        history: str = "",
+        context: dict = None,
+        selection_role: str = "Architect",
+        model_candidates: Optional[list[str]] = None,
+    ) -> tuple[SpecialistPlan, str]:
+        prompt = self.registry.get(role)
+        attempted = []
+        last_plan = None
+        ordered_models = self._prepare_candidate_models(selection_role, context, model_candidates=model_candidates)
+        for model in ordered_models:
+            attempted.append(model)
+            agent = SoftwareTeamAgent(role=role, model=model, system_prompt=prompt)
+            plan = agent.plan(task, history=history)
+            self._capture_call_metadata(role, agent)
+            llm_result = agent.last_result()
+            if not llm_result or llm_result.success:
+                logger.info(
+                    "specialist_completed",
+                    extra={
+                        "iteration": self.current_iteration,
+                        "agent_name": role,
+                        "model": model,
+                        "provider": provider_for_model(model, ""),
+                    },
+                )
+                return plan, model
+            error_payload = BaseAgent.error_payload(llm_result.text, llm_result=llm_result) or {}
+            self._handle_provider_error(model, error_payload)
+            last_plan = plan
+        fallback = last_plan or SpecialistPlan(
+            role=role,
+            scope=f"{role} did not complete a normal pass.",
+            recommendations=[f"Retry the {role} pass with a fallback model."],
+            risks=["No specialist output was produced."],
+            dependencies=[],
+            interfaces=[],
+            implementation_steps=[],
+            open_questions=["Should this lane be retried with a different model or narrower prompt?"],
+            implementation_artifact="",
+        )
+        return fallback, attempted[-1] if attempted else ""
+
+    def _prepare_candidate_models(
+        self,
+        agent: str,
+        context: dict = None,
+        model_candidates: Optional[list[str]] = None,
+    ) -> list[str]:
+        if not model_candidates:
+            return self._candidate_models(agent, context)
+
+        ordered = [str(model).strip() for model in model_candidates if str(model).strip()]
+        expanded = list(ordered)
+        for model in ordered:
+            expanded.extend(self.selector.fallback_models(agent, model))
+
+        seen = set()
+        unique = []
+        for model in expanded:
+            if model and model not in seen:
+                unique.append(model)
+                seen.add(model)
+        return unique or self._candidate_models(agent, context)
 
     def _attempt_repair(self, raw_output: str) -> Optional[dict]:
         prompt = self.registry.get("JSON Repair")

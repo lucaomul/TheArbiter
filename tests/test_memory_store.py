@@ -32,6 +32,7 @@ def _record(store, *, task_mode, task_text, avg_score=8.0, tech_issues=None, log
         score_status="final",
         verification_status="VERIFIED",
         verification_score=8.5,
+        verification_checks=[],
         ship_readiness="READY",
         run_id="run-test",
     )
@@ -131,3 +132,114 @@ def test_task_mode_index_stays_correct_after_multiple_writes(tmp_path, monkeypat
     assert marketing_ids == {marketing_a["memory_id"], marketing_b["memory_id"]}
     assert planning_ids == {planning["memory_id"]}
     assert all(entry["task_mode"] == "Marketing & Growth" for entry in retrieved)
+
+
+def test_grounding_flags_downgrade_memory_to_caution(tmp_path, monkeypatch):
+    store = _make_store(tmp_path, monkeypatch)
+
+    entry = store.record_iteration(
+        task_mode="Marketing & Growth",
+        task_text="Create a dental SaaS go-to-market plan.",
+        iteration=1,
+        avg_score=8.2,
+        preflight_issues=[],
+        tech_issues=[],
+        logic_issues=[],
+        tech_repair_contract=[],
+        logic_repair_contract=[],
+        architect_model="architect-test",
+        tech_model="tech-test",
+        logic_model="logic-test",
+        validity_status="VALID",
+        score_status="final",
+        verification_status="CAUTION",
+        verification_score=0.74,
+        verification_summary="The response presents unsupported external statistics.",
+        verification_checks=[
+            {
+                "name": "grounding_discipline",
+                "status": "caution",
+                "detail": "Unsupported external statistics were detected.",
+            }
+        ],
+        ship_readiness="CLOSE",
+        run_id="run-grounding",
+    )
+
+    assert entry["memory_status"] == "ACCEPT_WITH_CAUTION"
+    assert entry["memory_lifecycle"] == "caution"
+    assert entry["memory_trust_flags"] == ["grounding_discipline"]
+    assert any("trust-sensitive issues" in reason for reason in entry["memory_reasons"])
+
+
+def test_retrieval_prefers_clean_memory_over_flagged_memory(tmp_path, monkeypatch):
+    store = _make_store(tmp_path, monkeypatch)
+
+    flagged = store.record_iteration(
+        task_mode="Writing & Content",
+        task_text="Write a memo about AI adoption in agencies with sources.",
+        iteration=1,
+        avg_score=8.1,
+        preflight_issues=[],
+        tech_issues=[],
+        logic_issues=[],
+        tech_repair_contract=[],
+        logic_repair_contract=[],
+        architect_model="architect-test",
+        tech_model="tech-test",
+        logic_model="logic-test",
+        validity_status="VALID",
+        score_status="final",
+        verification_status="CAUTION",
+        verification_score=0.75,
+        verification_summary="Sources were requested but not present.",
+        verification_checks=[
+            {
+                "name": "expected_sources",
+                "status": "caution",
+                "detail": "Missing requested sources.",
+            }
+        ],
+        ship_readiness="CLOSE",
+        run_id="run-flagged",
+    )
+
+    clean = store.record_iteration(
+        task_mode="Writing & Content",
+        task_text="Write a memo about AI adoption in agencies with sources.",
+        iteration=2,
+        avg_score=8.0,
+        preflight_issues=[],
+        tech_issues=[],
+        logic_issues=[],
+        tech_repair_contract=[],
+        logic_repair_contract=[],
+        architect_model="architect-test",
+        tech_model="tech-test",
+        logic_model="logic-test",
+        validity_status="VALID",
+        score_status="final",
+        verification_status="VERIFIED",
+        verification_score=0.9,
+        verification_summary="Sources were present.",
+        verification_checks=[
+            {
+                "name": "expected_sources",
+                "status": "pass",
+                "detail": "Explicit sources were included.",
+            }
+        ],
+        ship_readiness="READY",
+        run_id="run-clean",
+    )
+
+    retrieved = store._structured_retrieval(
+        "Writing & Content",
+        "Write a memo about AI adoption in agencies with sources.",
+        unresolved_issues=None,
+        limit=5,
+    )
+
+    assert retrieved
+    assert retrieved[0]["memory_id"] == clean["memory_id"]
+    assert flagged["memory_id"] in {entry["memory_id"] for entry in retrieved}

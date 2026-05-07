@@ -1,3 +1,4 @@
+from arbiter.agents.software_team import SOFTWARE_TEAM_PROMPTS
 from arbiter.config.settings import TASK_PROFILES
 from arbiter.infra.memory_store import get_memory_store
 from arbiter.prompts.templates.base import (
@@ -32,6 +33,15 @@ class PromptRegistry:
             "Logic Critic": profile["logic"],
             "Janitor":      profile.get("janitor", profile["architect"]),
             "JSON Repair":  "Preserve intended meaning while repairing malformed structured output.",
+            "Lead Software Architect": "Break larger software tasks into concrete work packages, contracts, handoffs, and acceptance criteria.",
+            "Backend Architect": "Own backend implementation, APIs, validation, and server-side integration details.",
+            "Frontend Architect": "Own UI implementation, interaction flow, and page/component structure.",
+            "Database Architect": "Own schema design, persistence, SQL, migrations, and data integrity boundaries.",
+            "DevOps & Reliability Architect": "Own deployment, observability, runtime safety, and CI/CD concerns.",
+            "Security Architect": "Own auth, secure defaults, access control, and sensitive-data handling.",
+            "QA/Test Architect": "Own test strategy, regression coverage, and release confidence.",
+            "Integration Architect": "Own cross-system contracts, seams, and subsystem handoffs.",
+            "Performance Architect": "Own scalability, caching, bottlenecks, and performance tradeoffs.",
         }
         role_playbook = (profile.get("role_playbooks") or {}).get(role, "")
         mode_note = (
@@ -52,6 +62,7 @@ class PromptRegistry:
             "Janitor":      JANITOR_PROMPT,
             "JSON Repair":  JSON_REPAIR_PROMPT,
         }
+        base_map.update(SOFTWARE_TEAM_PROMPTS)
         base = base_map.get(role, PROPOSER_PROMPT)
         return self._inject_mode(base, role)
 
@@ -140,7 +151,7 @@ class PromptRegistry:
         ]
         return sum(1 for keyword in keywords if keyword in raw) >= 2
 
-    def build_task_payload(self, user_text: str) -> str:
+    def build_task_payload(self, user_text: str, evidence_bundle=None) -> str:
         profile = self._get_profile()
         domain_blueprint = ""
         if self.task_mode == "Software & IT" and self._is_scheduling_task(user_text):
@@ -151,12 +162,16 @@ class PromptRegistry:
                 "- Prevent same-day DAY/NIGHT conflicts and enforce a 10-hour rest window with real time values.\n"
                 "- Build sheet updates in memory and write back in batches.\n"
             )
+        evidence_context = ""
+        if evidence_bundle is not None and getattr(evidence_bundle, "sources", None):
+            evidence_context = "\n\n" + evidence_bundle.prompt_context()
         return (
             f"TASK MODE: {self.task_mode}\n"
             f"MODE SUMMARY: {profile['summary']}\n"
             f"{self._build_delivery_contract()}\n"
             f"{domain_blueprint}"
             f"USER REQUEST:\n{user_text.strip()}"
+            f"{evidence_context}"
         )
 
     def build_architect_history(self, state, manual_override: str = "") -> str:

@@ -14,6 +14,7 @@ from arbiter.core.stopping import Stopper
 from arbiter.core.learning.optimizer import LearningOptimizer
 from arbiter.core.preflight import PreflightValidator
 from arbiter.core.final_verifier import FinalVerifier, VerificationResult
+from arbiter.core.software_team import SoftwareTeamCoordinator
 from arbiter.prompts.registry import PromptRegistry
 from arbiter.config.settings import SETTINGS
 from arbiter.infra.memory_store import get_memory_store
@@ -51,6 +52,7 @@ class IterationEngine:
         self.optimizer = LearningOptimizer()
         self.preflight = PreflightValidator()
         self.verifier = FinalVerifier()
+        self.software_team = SoftwareTeamCoordinator(self.runner)
         self.memory = get_memory_store()
         self.benchmarks = get_benchmark_store()
         self.formatter = ResultFormatter()
@@ -62,6 +64,7 @@ class IterationEngine:
     def execute(self, state: ArbiterState, manual_override: str = "") -> ArbiterResult:
         stop, reason = False, ""
         run_id = f"run-{uuid4().hex[:12]}"
+        self.software_team.runner = self.runner
 
         while not stop:
             state.iteration += 1
@@ -71,11 +74,12 @@ class IterationEngine:
                 extra={"run_id": run_id, "iteration": state.iteration},
             )
             recommendations = self.optimizer.optimize(state)
+            quality_architect_model = self.optimizer.quality_architect_model()
 
             # Context for model selector
             context = {
                 "last_tech_score": state.last_tech_score,
-                "force_quality":   recommendations.get("architect_model") == "gpt-4o" and not self.stable_mode,
+                "force_quality": recommendations.get("architect_model") == quality_architect_model and not self.stable_mode,
                 "stable_mode": self.stable_mode,
                 "iteration": state.iteration,
             }
@@ -92,13 +96,13 @@ class IterationEngine:
                 ).strip()
 
             # ── 2. Architect ─────────────────────────────────
-            proposal, arch_model = self.runner.run_architect(
-                state.current_task,
-                history=history_str,
-                context=context,
+            proposal, arch_model, software_team_meta = self._run_proposal_phase(
+                state,
+                history_str,
+                context,
+                recommendations,
+                run_id,
             )
-            state.track_cost("Architect", self.runner.latest_call_cost("Architect", arch_model))
-            state.record_model_usage("Architect", arch_model, self.runner.latest_call_metadata("Architect"))
 
             proposal_error = BaseAgent.error_payload(proposal)
             if proposal_error and proposal_error.get("provider_error"):
@@ -143,6 +147,7 @@ class IterationEngine:
                     architect_model=arch_model,
                     tech_model="",
                     logic_model="",
+                    **self._software_team_record_fields(software_team_meta),
                 )
                 state.add_iteration(record)
                 memory_entry = self.memory.record_iteration(
@@ -164,6 +169,7 @@ class IterationEngine:
                     verification_status=record.verification_status,
                     verification_score=record.verification_score,
                     verification_summary=record.verification_summary,
+                    verification_checks=record.verification_checks,
                     ship_readiness=record.ship_readiness,
                     run_id=run_id,
                     source_trace={
@@ -351,6 +357,7 @@ class IterationEngine:
                     architect_model=arch_model,
                     tech_model=tech_model,
                     logic_model=logic_model,
+                    **self._software_team_record_fields(software_team_meta),
                 )
                 state.add_iteration(record)
                 memory_entry = self.memory.record_iteration(
@@ -372,6 +379,7 @@ class IterationEngine:
                     verification_status=record.verification_status,
                     verification_score=record.verification_score,
                     verification_summary=record.verification_summary,
+                    verification_checks=record.verification_checks,
                     ship_readiness=record.ship_readiness,
                     run_id=run_id,
                     source_trace={
@@ -536,6 +544,7 @@ class IterationEngine:
                 architect_model=arch_model,
                 tech_model=t_model,
                 logic_model=l_model,
+                **self._software_team_record_fields(software_team_meta),
             )
             state.add_iteration(record)
             memory_entry = self.memory.record_iteration(
@@ -557,6 +566,7 @@ class IterationEngine:
                 verification_status=record.verification_status,
                 verification_score=record.verification_score,
                 verification_summary=record.verification_summary,
+                verification_checks=record.verification_checks,
                 ship_readiness=record.ship_readiness,
                 run_id=run_id,
                 source_trace={
@@ -600,6 +610,7 @@ class IterationEngine:
         latest_score_status = state.iteration_history[-1].get("score_status", "final") if state.iteration_history else "final"
         latest_verification_status = state.iteration_history[-1].get("verification_status", "UNVERIFIED") if state.iteration_history else "UNVERIFIED"
         latest_ship_readiness = state.iteration_history[-1].get("ship_readiness", "UNASSESSED") if state.iteration_history else "UNASSESSED"
+        team_meta = dict(getattr(state, "software_team_plan", {}) or {})
         logger.info(
             "run_completed",
             extra={
@@ -627,6 +638,14 @@ class IterationEngine:
             benchmark_pack=state.benchmark_pack,
             benchmark_case_id=state.benchmark_case_id,
             benchmark_case_title=state.benchmark_case_title,
+            team_mode_expected=(True if team_meta.get("recommended", team_meta.get("use_team", False)) else None),
+            team_mode_recommended=bool(team_meta.get("recommended", team_meta.get("use_team", False))),
+            team_mode_used=bool(team_meta.get("use_team", False)),
+            team_approval_missing=bool(team_meta.get("approval_missing", False)),
+            team_complexity_score=int(team_meta.get("complexity_score", 0) or 0),
+            team_complexity_level=str(team_meta.get("complexity_level", "") or ""),
+            team_detected_domains=list(team_meta.get("detected_domains", []) or []),
+            team_roles=list(team_meta.get("roles", []) or team_meta.get("suggested_roles", []) or []),
         )
         self._persist_run_summary(
             run_id=run_id,
@@ -668,6 +687,8 @@ class IterationEngine:
                 "current_solution": state.current_solution,
                 "latest_janitor_report": state.latest_janitor_report,
                 "latest_result_status": latest_validity,
+                "software_team": state.software_team_plan,
+                "evidence": state.evidence_bundle.preview() if state.evidence_bundle is not None else {},
                 "run_id": run_id,
             },
         )
@@ -675,6 +696,7 @@ class IterationEngine:
     @staticmethod
     def _build_janitor_payload(state: ArbiterState, proposal: str, preflight_issues: list, t_res: dict, l_res: dict) -> str:
         unresolved = getattr(state, "unresolved_issues", {"tech": [], "logic": []})
+        team_meta = dict(getattr(state, "software_team_plan", {}) or {})
         tech_defects = (t_res.get("confirmed_defects") or [])[:4]
         logic_defects = (l_res.get("confirmed_defects") or [])[:4]
         tech_fix = str(t_res.get("fix_suggestion", "") or "").strip()[:120]
@@ -686,17 +708,43 @@ class IterationEngine:
         logic_contract = [str(item).strip() for item in (l_res.get("repair_contract") or []) if str(item).strip()][:4]
         unresolved_tech = [str(item).strip() for item in (unresolved.get("tech") or []) if str(item).strip()][:6]
         unresolved_logic = [str(item).strip() for item in (unresolved.get("logic") or []) if str(item).strip()][:6]
+        team_roles = [str(item).strip() for item in (team_meta.get("roles") or []) if str(item).strip()][:6]
+        team_domains = [str(item).strip() for item in (team_meta.get("detected_domains") or []) if str(item).strip()][:6]
+        team_handoffs = [str(item).strip() for item in (team_meta.get("cross_team_handoffs") or []) if str(item).strip()][:4]
+        team_risks = [str(item).strip() for item in (team_meta.get("main_risks") or []) if str(item).strip()][:4]
+        specialist_summaries = []
+        for item in (team_meta.get("specialist_summaries") or [])[:4]:
+            role = str(item.get("role", "") or "").strip()
+            rec = str(item.get("top_recommendation", "") or item.get("scope", "")).strip()
+            if role and rec:
+                specialist_summaries.append(f"{role}: {rec[:110]}")
 
         def section(title: str, items: list[str], empty_text: str = "- None") -> str:
             if not items:
                 return f"{title}:\n{empty_text}\n"
             return title + ":\n" + "\n".join(f"- {item}" for item in items) + "\n"
 
+        team_section = ""
+        if team_meta.get("use_team"):
+            architecture_summary = str(team_meta.get("architecture_summary", "") or "").strip()
+            if len(architecture_summary) > 180:
+                architecture_summary = architecture_summary[:180].rstrip() + "..."
+            team_section = (
+                section("SOFTWARE TEAM DOMAINS", team_domains)
+                + section("SOFTWARE TEAM ROLES", team_roles)
+                + (f"SOFTWARE TEAM ARCHITECTURE SUMMARY:\n- {architecture_summary}\n" if architecture_summary else "")
+                + section("CROSS-TEAM HANDOFFS", team_handoffs)
+                + section("TEAM RISKS", team_risks)
+                + section("SPECIALIST SNAPSHOTS", specialist_summaries)
+                + "\n"
+            )
+
         return (
             "TASK MODE:\n"
             f"{state.task_mode}\n\n"
             "LATEST SOLUTION:\n"
             f"{latest_solution}\n\n"
+            + team_section
             + section("PREFLIGHT ISSUES", [str(item).strip() for item in preflight_issues if str(item).strip()])
             + "\n"
             + section("TECH CONFIRMED DEFECTS", tech_defects)
@@ -766,6 +814,27 @@ class IterationEngine:
                     "model_usage": state.model_usage[-25:],
                     "preflight_events": state.preflight_events,
                     "repair_events": state.repair_events,
+                    "team_mode_used": bool((state.software_team_plan or {}).get("use_team")),
+                    "team_recommended": bool((state.software_team_plan or {}).get("recommended", False)),
+                    "team_approval_missing": bool((state.software_team_plan or {}).get("approval_missing", False)),
+                    "team_profile": str((state.software_team_plan or {}).get("selected_profile", "")),
+                    "team_profile_label": str((state.software_team_plan or {}).get("selected_profile_label", "")),
+                    "team_roles": list((state.software_team_plan or {}).get("roles", [])),
+                    "detected_domains": list((state.software_team_plan or {}).get("detected_domains", [])),
+                    "detected_technologies": list((state.software_team_plan or {}).get("detected_technologies", [])),
+                    "team_signal_reasons": list((state.software_team_plan or {}).get("signal_reasons", [])),
+                    "team_complexity_level": str((state.software_team_plan or {}).get("complexity_level", "")),
+                    "team_estimated_cost_multiplier": float((state.software_team_plan or {}).get("estimated_cost_multiplier", 0.0) or 0.0),
+                    "team_estimated_latency_multiplier": float((state.software_team_plan or {}).get("estimated_latency_multiplier", 0.0) or 0.0),
+                    "architecture_summary": str((state.software_team_plan or {}).get("architecture_summary", "")),
+                    "team_routing_reason": str((state.software_team_plan or {}).get("routing_reason", "")),
+                    "team_user_approved": bool((state.software_team_plan or {}).get("user_approved", False)),
+                    "team_role_models": dict((state.software_team_plan or {}).get("role_models", {}) or {}),
+                    "evidence_source_count": len((state.evidence_bundle.sources if state.evidence_bundle is not None else []) or []),
+                    "evidence_source_names": [item.name for item in ((state.evidence_bundle.sources or []) if state.evidence_bundle is not None else [])][:12],
+                    "evidence_warning_count": len((state.evidence_bundle.warnings if state.evidence_bundle is not None else []) or []),
+                    "evidence_warnings": list((state.evidence_bundle.warnings if state.evidence_bundle is not None else []) or [])[:6],
+                    "evidence_rag_used": bool((state.evidence_bundle.rag_used if state.evidence_bundle is not None else False)),
                 },
             }
         )
@@ -823,6 +892,97 @@ class IterationEngine:
     def _record_role_call(self, state: ArbiterState, cost_role: str, usage_role: str, model: str) -> None:
         state.track_cost(cost_role, self.runner.latest_call_cost(cost_role, model))
         state.record_model_usage(usage_role, model, self.runner.latest_call_metadata(cost_role))
+
+    @staticmethod
+    def _software_team_record_fields(software_team_meta: dict) -> dict:
+        meta = dict(software_team_meta or {})
+        return {
+            "software_team_active": bool(meta.get("use_team")),
+            "software_team_complexity_score": int(meta.get("complexity_score", 0) or 0),
+            "software_team_signals": list(meta.get("detected_domains", [])),
+            "software_team_specialists": list(meta.get("roles", []) or meta.get("suggested_roles", [])),
+            "software_team_summary": str(meta.get("routing_reason", "") or meta.get("reason", "")),
+            "software_team_detected_domains": list(meta.get("detected_domains", [])),
+            "software_team_detected_technologies": list(meta.get("detected_technologies", [])),
+            "software_team_roles": list(meta.get("roles", []) or meta.get("suggested_roles", [])),
+            "software_team_reason": str(meta.get("routing_reason", "") or meta.get("reason", "")),
+            "software_team_signal_reasons": list(meta.get("signal_reasons", [])),
+            "software_team_complexity_level": str(meta.get("complexity_level", "standard") or "standard"),
+            "software_team_recommended": bool(meta.get("recommended", meta.get("use_team", False))),
+            "software_team_approval_missing": bool(meta.get("approval_missing", False)),
+            "software_team_user_approved": bool(meta.get("user_approved", False)),
+            "software_team_profile": str(meta.get("selected_profile", "")),
+            "software_team_estimated_cost_multiplier": float(meta.get("estimated_cost_multiplier", 1.0) or 1.0),
+            "software_team_estimated_latency_multiplier": float(meta.get("estimated_latency_multiplier", 1.0) or 1.0),
+            "software_team_requires_confirmation": bool(meta.get("requires_confirmation", False)),
+            "software_team_architecture_summary": str(meta.get("architecture_summary", "")),
+            "software_team_specialist_summaries": list(meta.get("specialist_summaries", [])),
+            "software_team_role_models": dict(meta.get("role_models", {}) or {}),
+        }
+
+    def _ensure_software_team_plan(self, state: ArbiterState) -> dict:
+        if state.software_team_plan:
+            return dict(state.software_team_plan)
+        decision = self.software_team.route(state.task_mode, state.user_input)
+        plan = decision.model_dump()
+        user_approved = bool(getattr(state, "software_team_user_approved", False))
+        plan["recommended"] = bool(plan.get("use_team"))
+        plan["user_approved"] = user_approved
+        plan["selected_profile"] = str(getattr(state, "software_team_profile", "") or plan.get("recommended_profile", ""))
+        if plan.get("use_team") and plan.get("requires_confirmation") and not user_approved:
+            logger.info(
+                "software_team_consent_missing",
+                extra={
+                    "run_id": getattr(state, "run_id", ""),
+                    "iteration": state.iteration,
+                    "agent_name": "Software Team Router",
+                    "use_team": False,
+                    "recommended": True,
+                    "failure_reason": "Complex software team was recommended but not approved.",
+                },
+            )
+            plan["approval_missing"] = True
+            plan["use_team"] = False
+            plan["routing_reason"] = str(plan.get("reason", "") or "")
+            plan["reason"] = (
+                "A larger software team was recommended for this task, but explicit approval was not present. "
+                "The run stayed on the normal architect path to preserve transparency."
+            )
+        else:
+            plan["approval_missing"] = False
+        state.software_team_plan = dict(plan)
+        state.task_complexity = "software_team" if plan.get("use_team") else "normal"
+        state.constraints = list(plan.get("detected_domains", []))
+        return dict(plan)
+
+    def _run_proposal_phase(
+        self,
+        state: ArbiterState,
+        history: str,
+        context: dict,
+        recommendations: dict,
+        run_id: str,
+    ) -> tuple[str, str, dict]:
+        plan = self._ensure_software_team_plan(state)
+        if not plan.get("use_team"):
+            proposal, arch_model = self.runner.run_architect(
+                state.current_task,
+                history=history,
+                context=context,
+            )
+            self._record_role_call(state, "Architect", "Architect", arch_model)
+            return proposal, arch_model, plan
+
+        proposal, arch_model, team_plan = self.software_team.build_solution(
+            state=state,
+            history=history,
+            context=context,
+            run_id=run_id,
+            iteration=state.iteration,
+        )
+        team_plan["user_approved"] = bool(getattr(state, "software_team_user_approved", False))
+        state.software_team_plan = dict(team_plan or {})
+        return proposal, arch_model, dict(team_plan or {})
 
     def _run_initial_critics(
         self,
@@ -953,6 +1113,7 @@ class IterationEngine:
             tech_confirmed_defects=tech_result.get("confirmed_defects", []),
             logic_confirmed_defects=logic_result.get("confirmed_defects", []),
             provider_error=provider_error,
+            evidence_bundle=state.evidence_bundle,
         )
 
     @staticmethod

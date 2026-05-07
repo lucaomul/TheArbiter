@@ -198,7 +198,8 @@ button[title*="Help"] svg {
 }
 
 [data-baseweb="tooltip"],
-[role="tooltip"] {
+[role="tooltip"],
+[data-testid="stTooltipContent"] {
     background: #111111 !important;
     color: #ffffff !important;
     border: 1px solid rgba(255,255,255,0.14) !important;
@@ -206,9 +207,30 @@ button[title*="Help"] svg {
 }
 
 [data-baseweb="tooltip"] *,
-[role="tooltip"] * {
+[role="tooltip"] *,
+[data-testid="stTooltipContent"] *,
+[data-testid="stTooltipContent"] p,
+[data-testid="stTooltipContent"] span,
+[data-testid="stTooltipContent"] div,
+[data-testid="stTooltipContent"] li,
+[data-testid="stTooltipContent"] label {
     color: #ffffff !important;
     fill: #ffffff !important;
+}
+
+[data-testid="stSidebar"] div[data-testid="stTooltipIcon"] button,
+[data-testid="stSidebar"] button[aria-label*="Help"],
+[data-testid="stSidebar"] button[title*="Help"] {
+    background: rgba(255,255,255,0.14) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255,255,255,0.22) !important;
+}
+
+[data-testid="stSidebar"] div[data-testid="stTooltipIcon"] button svg,
+[data-testid="stSidebar"] button[aria-label*="Help"] svg,
+[data-testid="stSidebar"] button[title*="Help"] svg {
+    fill: #ffffff !important;
+    color: #ffffff !important;
 }
 
 .arbiter-help-inline {
@@ -220,6 +242,77 @@ button[title*="Help"] svg {
     color: #4f4f4a;
     font-size: 0.84rem;
     line-height: 1.45;
+}
+
+.arbiter-intake-header {
+    margin-bottom: 0.8rem;
+}
+
+.arbiter-intake-eyebrow {
+    color: #6b6b66;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.7rem;
+    font-weight: 700;
+    margin-bottom: 0.32rem;
+}
+
+.arbiter-intake-title {
+    color: var(--title);
+    font-size: 1.18rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.22rem;
+}
+
+.arbiter-intake-subtitle {
+    color: var(--text-soft);
+    font-size: 0.92rem;
+    line-height: 1.55;
+    max-width: 54rem;
+}
+
+.arbiter-intake-note {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: baseline;
+    margin-top: 0.65rem;
+    color: #4f4f4a;
+    font-size: 0.84rem;
+    line-height: 1.55;
+}
+
+.arbiter-intake-note-label {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.arbiter-intake-note-separator {
+    color: #8a8a84;
+    padding: 0 0.1rem;
+}
+
+.arbiter-input-tools {
+    margin-top: 0.35rem;
+    margin-bottom: 0.2rem;
+}
+
+.arbiter-input-tools-tight {
+    margin-top: 0.45rem;
+    margin-bottom: 0;
+    font-size: 0.8rem;
+}
+
+.arbiter-help-icon-only {
+    margin-top: 0.2rem;
+    justify-content: center;
+}
+
+.arbiter-intake-help {
+    margin-top: 0.55rem;
+    margin-bottom: 0;
+    justify-content: flex-start;
 }
 
 .arbiter-help-icon {
@@ -265,7 +358,13 @@ button[title*="Help"] svg {
     opacity: 1;
 }
 
-.stButton > button {
+.arbiter-run-actions {
+    margin-top: 0.9rem;
+    padding-top: 0.2rem;
+}
+
+.stButton > button,
+.stDownloadButton > button {
     border-radius: 14px !important;
     border: 1px solid #111111 !important;
     background: linear-gradient(180deg, #111111, #1f1f1f) !important;
@@ -278,17 +377,27 @@ button[title*="Help"] svg {
 .stButton > button *,
 .stButton > button p,
 .stButton > button span,
-.stButton > button div {
+.stButton > button div,
+.stDownloadButton > button *,
+.stDownloadButton > button p,
+.stDownloadButton > button span,
+.stDownloadButton > button div {
     color: #ffffff !important;
     fill: #ffffff !important;
 }
 
-.stButton > button:hover {
+.stButton > button:hover,
+.stDownloadButton > button:hover {
     border-color: #111111 !important;
     background: linear-gradient(180deg, #2a2a2a, #111111) !important;
     color: #ffffff !important;
     transform: translateY(-1px);
     box-shadow: 0 12px 24px rgba(0,0,0,0.16);
+}
+
+.stDownloadButton > button {
+    min-height: 42px !important;
+    padding: 0.55rem 1rem !important;
 }
 
 [data-testid="stFormSubmitButton"] > button {
@@ -297,6 +406,9 @@ button[title*="Help"] svg {
     background: #111111 !important;
     color: #ffffff !important;
     font-weight: 700 !important;
+    min-height: 42px !important;
+    padding: 0.55rem 1rem !important;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.12) !important;
 }
 
 [data-testid="stFormSubmitButton"] > button *,
@@ -310,6 +422,79 @@ button[title*="Help"] svg {
 [data-testid="stFormSubmitButton"] > button:hover {
     background: #2a2a2a !important;
     color: #ffffff !important;
+    box-shadow: 0 12px 24px rgba(0,0,0,0.16) !important;
+}
+
+[data-testid="stFileUploader"] {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column-reverse !important;
+    align-items: flex-start !important;
+}
+
+[data-testid="stFileUploader"] section,
+[data-testid="stFileUploaderDropzone"] {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    min-height: auto !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+}
+
+[data-testid="stFileUploaderDropzoneInstructions"] {
+    display: none !important;
+}
+
+[data-testid="stFileUploader"] small {
+    color: var(--text-soft) !important;
+}
+
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"],
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"]:focus {
+    border-radius: 12px !important;
+    border: 1px solid #111111 !important;
+    background: #ffffff !important;
+    color: #111111 !important;
+    font-weight: 700 !important;
+    min-height: 42px !important;
+    padding: 0.55rem 0.95rem !important;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.08) !important;
+    text-indent: -9999px !important;
+    line-height: 0 !important;
+}
+
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"]:focus {
+    background: #f6f6f4 !important;
+}
+
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"]::after {
+    content: "Attach a File";
+    text-indent: 0 !important;
+    line-height: 1.1 !important;
+    color: #111111 !important;
+    display: inline-block !important;
+    font-weight: 700 !important;
+}
+
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"] *,
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"] span,
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"] div,
+[data-testid="stFileUploader"] [data-testid="stBaseButton-secondary"] p {
+    color: #111111 !important;
+    fill: #111111 !important;
+}
+
+[data-testid="stFileUploaderFileName"] {
+    font-weight: 500 !important;
+    color: var(--text) !important;
+}
+
+[data-testid="stFileUploader"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stFileUploader"] [data-testid="stMarkdownContainer"] span {
+    color: var(--text-soft) !important;
 }
 
 [data-testid="stMetric"] {

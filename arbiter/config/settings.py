@@ -36,6 +36,11 @@ class Settings:
     parallel_critics: bool = True
     critic_timeout_seconds: int = 45
     critic_redundancy_score_band_check: bool = True
+    software_team_enabled: bool = True
+    software_team_complexity_threshold: int = 3
+    software_team_min_complexity_score: int = 3
+    software_team_timeout_seconds: int = 60
+    software_team_parallel: bool = True
 
     # Provider resilience
     rate_limit_cooldown_seconds: int = 45 * 60
@@ -139,6 +144,42 @@ TASK_PROFILES: dict = {
             "Janitor": (
                 "- Distill software findings into subsystem-level repair steps.\n"
                 "- Preserve working modules, batch resolved defects, and keep the retry brief implementation-focused."
+            ),
+            "Lead Software Architect": (
+                "- Decompose larger software work into a shared delivery blueprint with file boundaries, contracts, and acceptance criteria.\n"
+                "- Call out which workstreams are backend, frontend, data, operations, security, or integration so specialists can build without overlap."
+            ),
+            "Backend Architect": (
+                "- Own Python services, endpoints, business logic, integrations, and server-side validation.\n"
+                "- Return concrete backend implementation with explicit assumptions and interface notes."
+            ),
+            "Frontend Architect": (
+                "- Own user journeys, page/component structure, interaction flow, and HTML/CSS/JS implementation.\n"
+                "- Keep UI output intentional, implementation-ready, and consistent with the blueprint."
+            ),
+            "Database Architect": (
+                "- Own schema shape, persistence, SQL, migrations, and data integrity boundaries.\n"
+                "- Keep schema assumptions explicit and favor simple, reliable storage design."
+            ),
+            "DevOps & Reliability Architect": (
+                "- Own deployment, runtime safety, observability, CI/CD, and operational reliability.\n"
+                "- Keep runtime and delivery assumptions practical and explicit."
+            ),
+            "Security Architect": (
+                "- Own auth, permissions, secrets handling, secure defaults, and abuse-reduction controls.\n"
+                "- Focus on the real attack surfaces the task introduces."
+            ),
+            "QA/Test Architect": (
+                "- Own test coverage strategy, regression risk, contract checks, and release confidence.\n"
+                "- Favor the smallest useful test plan that materially reduces risk."
+            ),
+            "Integration Architect": (
+                "- Own cross-service seams, compatibility boundaries, and subsystem handoffs.\n"
+                "- Reduce mismatch risk between backend, frontend, database, and runtime concerns."
+            ),
+            "Performance Architect": (
+                "- Own scalability, caching, hotspots, latency, and throughput tradeoffs.\n"
+                "- Focus on the performance work that matters for this build."
             ),
         },
     },

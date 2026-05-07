@@ -3,6 +3,8 @@ from arbiter.models.result import ArbiterResult
 from arbiter.core.agent_runner import AgentRunner
 from arbiter.core.iteration_engine import IterationEngine
 from arbiter.prompts.registry import PromptRegistry
+from arbiter.infra.evidence_store import get_evidence_store
+from typing import Optional
 
 
 class ArbiterOrchestrator:
@@ -46,10 +48,19 @@ class ArbiterOrchestrator:
         user_input: str,
         clarification: str = "",
         manual_override: str = "",
+        allow_complex_software_team: Optional[bool] = None,
+        software_team_profile: str = "",
+        supporting_materials: Optional[list[dict]] = None,
+        supporting_urls: Optional[list[str]] = None,
     ) -> ArbiterResult:
 
         registry = PromptRegistry(task_mode=self.task_mode)
         runner = AgentRunner(registry)
+        evidence_bundle = get_evidence_store().ingest(
+            query=user_input,
+            materials=supporting_materials or [],
+            urls=supporting_urls or [],
+        )
 
         # ── 1. Build state ────────────────────────────────────
         state            = ArbiterState(
@@ -61,8 +72,11 @@ class ArbiterOrchestrator:
             benchmark_pack=self.benchmark_pack,
             benchmark_case_id=self.benchmark_case_id,
             benchmark_case_title=self.benchmark_case_title,
+            evidence_bundle=evidence_bundle,
         )
-        state.current_task = registry.build_task_payload(user_input)
+        state.current_task = registry.build_task_payload(user_input, evidence_bundle=evidence_bundle)
+        state.software_team_user_approved = bool(allow_complex_software_team)
+        state.software_team_profile = str(software_team_profile or "").strip().lower()
 
         if clarification:
             state.current_task += f"\nAdditional context: {clarification}"

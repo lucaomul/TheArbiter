@@ -153,9 +153,24 @@ Request fields:
   "target_score": 8.0,
   "clarification": "",
   "manual_override": "",
-  "stable_mode": false
+  "stable_mode": false,
+  "supporting_urls": ["https://example.com/spec"],
+  "supporting_materials": [
+    {
+      "name": "brief.txt",
+      "media_type": "text/plain",
+      "content": "Use this brief as primary evidence.",
+      "content_base64": "",
+      "source_type": "file"
+    }
+  ]
 }
 ```
+
+Evidence notes:
+- `supporting_urls` lets the API fetch readable web evidence
+- `supporting_materials` supports inline text or base64-encoded binary content
+- attached evidence is chunked and retrieved into the same orchestration path used by the Streamlit workspace
 
 Possible `status` values:
 - `completed`
@@ -183,7 +198,11 @@ Example response:
   ],
   "total_cost_usd": 0.0142,
   "needs_clarification": false,
-  "clarification_questions": []
+  "clarification_questions": [],
+  "evidence_source_count": 2,
+  "evidence_source_names": ["brief.txt", "https://example.com/spec"],
+  "evidence_warning_count": 0,
+  "evidence_rag_used": true
 }
 ```
 

@@ -65,7 +65,16 @@ def test_runs_route_uses_mocked_orchestrator(monkeypatch):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-        def run(self, user_input, clarification="", manual_override=""):
+        def run(
+            self,
+            user_input,
+            clarification="",
+            manual_override="",
+            allow_complex_software_team=None,
+            software_team_profile="",
+            supporting_materials=None,
+            supporting_urls=None,
+        ):
             return ArbiterResult(
                 best_solution=f"Processed: {user_input}",
                 best_score=8.4,
@@ -81,7 +90,30 @@ def test_runs_route_uses_mocked_orchestrator(monkeypatch):
                         "verification_status": "VERIFIED",
                     }
                 ],
-                debug_info={"run_id": "api-test-run"},
+                debug_info={
+                    "run_id": "api-test-run",
+                    "software_team": {
+                        "use_team": True,
+                        "recommended": True,
+                        "approval_missing": False,
+                        "selected_profile": "dream",
+                        "selected_profile_label": "Dream Team",
+                        "roles": ["Lead Software Architect", "Backend Architect", "Frontend Architect"],
+                        "detected_domains": ["backend", "frontend", "database"],
+                        "detected_technologies": ["python", "react", "sql"],
+                        "signal_reasons": ["3 software domains", "multiple languages/frameworks"],
+                        "complexity_level": "complex",
+                        "estimated_cost_multiplier": 1.48,
+                        "estimated_latency_multiplier": 1.29,
+                        "architecture_summary": "Split the build into backend, frontend, and persistence workstreams.",
+                    },
+                    "evidence": {
+                        "source_count": 2,
+                        "source_names": ["brief.pdf", "https://example.com/spec"],
+                        "warning_count": 0,
+                        "rag_used": True,
+                    },
+                },
             )
 
     monkeypatch.setattr("arbiter.api.v1.routers.runs.ArbiterOrchestrator", FakeOrchestrator)
@@ -93,6 +125,15 @@ def test_runs_route_uses_mocked_orchestrator(monkeypatch):
             "task_mode": "Writing & Content",
             "max_iterations": 2,
             "target_score": 8.0,
+            "supporting_urls": ["https://example.com/spec"],
+            "supporting_materials": [
+                {
+                    "name": "brief.txt",
+                    "media_type": "text/plain",
+                    "content": "Ground the answer in this internal brief.",
+                    "source_type": "file",
+                }
+            ],
         },
     )
 
@@ -102,6 +143,23 @@ def test_runs_route_uses_mocked_orchestrator(monkeypatch):
     assert payload["best_score"] == 8.4
     assert payload["status"] == "completed"
     assert payload["iterations"][0]["verification_status"] == "VERIFIED"
+    assert payload["team_mode_used"] is True
+    assert payload["team_recommended"] is True
+    assert payload["team_approval_missing"] is False
+    assert payload["team_profile"] == "dream"
+    assert payload["team_profile_label"] == "Dream Team"
+    assert "Lead Software Architect" in payload["team_roles"]
+    assert payload["detected_domains"] == ["backend", "frontend", "database"]
+    assert payload["detected_technologies"] == ["python", "react", "sql"]
+    assert payload["team_signal_reasons"] == ["3 software domains", "multiple languages/frameworks"]
+    assert payload["team_complexity_level"] == "complex"
+    assert payload["team_estimated_cost_multiplier"] == 1.48
+    assert payload["team_estimated_latency_multiplier"] == 1.29
+    assert "Split the build" in payload["architecture_summary"]
+    assert payload["evidence_source_count"] == 2
+    assert payload["evidence_source_names"] == ["brief.pdf", "https://example.com/spec"]
+    assert payload["evidence_warning_count"] == 0
+    assert payload["evidence_rag_used"] is True
 
 
 def test_get_run_route_returns_persisted_payload(monkeypatch):
@@ -117,7 +175,25 @@ def test_get_run_route_returns_persisted_payload(monkeypatch):
             "iteration_count": 2,
             "total_cost_usd": 0.003,
             "ship_readiness": "CLOSE",
-            "run_metadata": {},
+            "run_metadata": {
+                "team_mode_used": False,
+                "team_recommended": True,
+                "team_approval_missing": True,
+                "team_profile": "efficient",
+                "team_profile_label": "Efficient Team",
+                "team_roles": ["Lead Software Architect", "Backend Architect"],
+                "detected_domains": ["backend", "api", "database"],
+                "detected_technologies": ["python", "fastapi", "sql"],
+                "team_signal_reasons": ["3 software domains", "architecture/refactor/production-system wording"],
+                "team_complexity_level": "complex",
+                "team_estimated_cost_multiplier": 1.36,
+                "team_estimated_latency_multiplier": 1.22,
+                "architecture_summary": "Backend-led delivery with shared contracts.",
+                "evidence_source_count": 1,
+                "evidence_source_names": ["customer-brief.docx"],
+                "evidence_warning_count": 1,
+                "evidence_rag_used": True,
+            },
         }
 
     async def fake_get_run_iterations(run_id):
@@ -141,6 +217,23 @@ def test_get_run_route_returns_persisted_payload(monkeypatch):
     payload = response.json()
     assert payload["run_id"] == "run-123"
     assert payload["iterations"][0]["avg_score"] == 7.5
+    assert payload["team_mode_used"] is False
+    assert payload["team_recommended"] is True
+    assert payload["team_approval_missing"] is True
+    assert payload["team_profile"] == "efficient"
+    assert payload["team_profile_label"] == "Efficient Team"
+    assert payload["team_roles"] == ["Lead Software Architect", "Backend Architect"]
+    assert payload["detected_domains"] == ["backend", "api", "database"]
+    assert payload["detected_technologies"] == ["python", "fastapi", "sql"]
+    assert payload["team_signal_reasons"] == ["3 software domains", "architecture/refactor/production-system wording"]
+    assert payload["team_complexity_level"] == "complex"
+    assert payload["team_estimated_cost_multiplier"] == 1.36
+    assert payload["team_estimated_latency_multiplier"] == 1.22
+    assert payload["architecture_summary"] == "Backend-led delivery with shared contracts."
+    assert payload["evidence_source_count"] == 1
+    assert payload["evidence_source_names"] == ["customer-brief.docx"]
+    assert payload["evidence_warning_count"] == 1
+    assert payload["evidence_rag_used"] is True
 
 
 def test_production_routes_require_api_key(monkeypatch):

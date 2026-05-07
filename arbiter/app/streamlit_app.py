@@ -19,11 +19,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from arbiter.core.orchestrator import ArbiterOrchestrator
+from arbiter.core.team_router import TeamRouter
 from arbiter.config.settings import TASK_PROFILES
 from arbiter.infra.cache import get_cache
 from arbiter.infra.memory_store import get_memory_store
 from arbiter.infra.benchmark_suite import get_benchmark_packs, get_benchmark_cases, get_case_by_id
 from arbiter.infra.plugin_registry import get_plugin_registry, provider_for_model
+from arbiter.app.export_artifacts import export_solution_csv, export_solution_xlsx
 from arbiter.app.ui_styles import UI_CSS
 from arbiter.app.visual_summaries import build_visual_blueprint_html
 
@@ -37,6 +39,7 @@ except ImportError:
 
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 REGISTRY = get_plugin_registry()
+TEAM_ROUTER = TeamRouter()
 try:
     REGISTRY.sync_catalog_if_needed()
 except Exception:
@@ -106,6 +109,14 @@ defaults = {
     "project_note_input_seq": 0,
     "pending_auto_run": False,
     "run_in_progress": False,
+    "software_team_consent": False,
+    "software_team_warning_ack": False,
+    "software_team_preview": {},
+    "software_team_profile": "efficient",
+    "supporting_materials": [],
+    "supporting_urls": [],
+    "supporting_urls_text": "",
+    "evidence_preview": {},
     "auto_mode_enabled": False,
     "target_score_setting": 8,
     "max_iterations_setting": 5,
@@ -258,6 +269,10 @@ def reset_run_state(keep_task_mode: bool = True):
         "auto_mode_enabled": st.session_state.auto_mode_enabled,
         "target_score_setting": st.session_state.target_score_setting,
         "max_iterations_setting": st.session_state.max_iterations_setting,
+        "supporting_materials": list(st.session_state.supporting_materials or []),
+        "supporting_urls": list(st.session_state.supporting_urls or []),
+        "supporting_urls_text": st.session_state.supporting_urls_text,
+        "software_team_profile": st.session_state.software_team_profile,
         "clarification_input_seq": int(st.session_state.clarification_input_seq or 0) + 1,
         "manual_feedback_input_seq": int(st.session_state.manual_feedback_input_seq or 0) + 1,
         "project_note_input_seq": int(st.session_state.project_note_input_seq or 0) + 1,
@@ -325,6 +340,41 @@ def sanitize_audit_questions(items, limit: int = 3) -> list[str]:
         if len(cleaned) >= limit:
             break
     return cleaned
+
+
+def get_software_team_preview(task_text: str, task_mode: str) -> dict:
+    if task_mode != "Software & IT":
+        return {}
+    decision = TEAM_ROUTER.route(task_mode, task_text)
+    return decision.model_dump()
+
+
+def maybe_require_software_team_consent(task_text: str) -> bool:
+    preview = get_software_team_preview(task_text, st.session_state.task_mode)
+    st.session_state.software_team_preview = dict(preview or {})
+    profile_options = dict(preview.get("profile_options", {}) or {})
+    if profile_options:
+        current_profile = str(st.session_state.software_team_profile or "").strip().lower()
+        if current_profile not in profile_options:
+            st.session_state.software_team_profile = str(preview.get("recommended_profile", "efficient") or "efficient")
+    if preview.get("use_team") and preview.get("requires_confirmation") and not st.session_state.software_team_consent:
+        st.session_state.pending_auto_run = False
+        st.session_state.run_in_progress = False
+        st.session_state.step = "team_consent"
+        return True
+    return False
+
+
+def run_orchestrator_safe(orchestrator: ArbiterOrchestrator, **kwargs):
+    try:
+        return orchestrator.run(**kwargs)
+    except TypeError as exc:
+        message = str(exc)
+        if "unexpected keyword argument 'software_team_profile'" not in message:
+            raise
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("software_team_profile", None)
+        return orchestrator.run(**fallback_kwargs)
 
 
 def registry_resolve_model_id(model_id: str) -> str:
@@ -941,6 +991,91 @@ def current_task_input_guide() -> dict:
     return TASK_INPUT_GUIDES.get(st.session_state.task_mode, fallback)
 
 
+def parse_supporting_urls(raw: str) -> list[str]:
+    pattern = re.compile(r"\b((?:https?://|www\.)[^\s<>()]+)", flags=re.IGNORECASE)
+    items = []
+    for match in pattern.findall(str(raw or "")):
+        url = str(match or "").strip().rstrip(".,);]")
+        if not url:
+            continue
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            url = f"https://{url}"
+        if url not in items:
+            items.append(url)
+    return items[:8]
+
+
+def serialize_uploaded_material(uploaded_file) -> dict:
+    return {
+        "name": str(getattr(uploaded_file, "name", "attachment") or "attachment"),
+        "media_type": str(getattr(uploaded_file, "type", "") or ""),
+        "bytes": uploaded_file.getvalue(),
+        "source_type": "file",
+    }
+
+
+def attachment_file_types() -> list[str]:
+    return [
+        "pdf",
+        "docx",
+        "txt",
+        "md",
+        "markdown",
+        "json",
+        "csv",
+        "html",
+        "htm",
+        "py",
+        "js",
+        "ts",
+        "tsx",
+        "jsx",
+        "sql",
+        "yaml",
+        "yml",
+        "xml",
+        "log",
+        "rst",
+    ]
+
+
+def render_pending_supporting_materials():
+    materials = list(st.session_state.supporting_materials or [])
+    urls = list(st.session_state.supporting_urls or [])
+    if not materials and not urls:
+        return
+    with st.container(border=True):
+        st.markdown("**Prepared Supporting Materials**")
+        summary = st.columns(3)
+        summary[0].metric("Files", len(materials))
+        summary[1].metric("Links", len(urls))
+        summary[2].metric("RAG", "Armed")
+        if materials:
+            st.caption(", ".join(item.get("name", "attachment") for item in materials[:6]))
+        if urls:
+            st.caption("Auto-detected links: " + " | ".join(urls[:4]))
+
+
+def normalize_prose_markdown(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?m)^(#{1,6})(\S)", r"\1 \2", text)
+    text = re.sub(r"(?m)^\s*(\*{3,}|_{3,})\s*(.+?)\s*(\*{3,}|_{3,})\s*$", r"**\2**", text)
+    text = re.sub(r"(?m)^\s*(\*{2}|_{2})\s*(.+?)\s*(\*{2}|_{2})\s*$", r"**\2**", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def render_prose_block(title: str, content: str):
+    normalized = normalize_prose_markdown(content)
+    if not normalized:
+        return
+    st.markdown(f"<div class='architect-section-label'>{title}</div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown(normalized)
+
+
 def render_intelligence_signals():
     if not st.session_state.iteration_history:
         return
@@ -1008,9 +1143,7 @@ def render_architect_content(content: str):
             st.markdown('<div class="architect-section-label">Solution Code</div>', unsafe_allow_html=True)
             st.code(raw, language=lang, line_numbers=show_line_numbers)
         else:
-            prose_html = html.escape(raw).replace("\n", "<br>")
-            st.markdown('<div class="architect-section-label">Architect Response</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="architect-notes">{prose_html}</div>', unsafe_allow_html=True)
+            render_prose_block("Architect Response", raw)
         return
 
     cursor = 0
@@ -1030,9 +1163,7 @@ def render_architect_content(content: str):
                 )
                 leading = insights_pattern.sub("", leading).strip()
                 if leading:
-                    prose_html = html.escape(leading).replace("\n", "<br>")
-                    st.markdown('<div class="architect-section-label">Architect Insights</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="architect-notes">{prose_html}</div>', unsafe_allow_html=True)
+                    render_prose_block("Architect Insights", leading)
 
         # Code block
         lang      = (match.group(1) or "").lower() or detect_code_language(match.group(2) or "")
@@ -1061,9 +1192,7 @@ def render_architect_content(content: str):
         )
         trailing = insights_pattern.sub("", trailing).strip()
         if trailing:
-            prose_html = html.escape(trailing).replace("\n", "<br>")
-            st.markdown('<div class="architect-section-label">Architect Insights</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="architect-notes">{prose_html}</div>', unsafe_allow_html=True)
+            render_prose_block("Architect Insights", trailing)
 
 
 def render_message(role: str, content: str):
@@ -1165,6 +1294,7 @@ def sync_state_from_result(result):
     st.session_state.unresolved_issues = result.debug_info.get("unresolved_issues", {"tech": [], "logic": []})
     st.session_state.latest_janitor_report = result.debug_info.get("latest_janitor_report", {})
     st.session_state.latest_result_status = result.debug_info.get("latest_result_status", "VALID")
+    st.session_state.evidence_preview = result.debug_info.get("evidence", {})
     st.session_state.run_id = result.debug_info.get("run_id", "")
 
 
@@ -1184,11 +1314,16 @@ def execute_deliberation_run(auto_mode: bool, target_score: float, max_iteration
                 benchmark_case_id=st.session_state.benchmark_case_id if st.session_state.benchmark_mode else "",
                 benchmark_case_title=(get_case_by_id(st.session_state.benchmark_case_id) or {}).get("title", "") if st.session_state.benchmark_mode else "",
             )
-            result = orchestrator.run(
-                user_input=st.session_state.current_task,
-                clarification="already_audited",
-                manual_override=manual_override,
-            )
+        result = run_orchestrator_safe(
+            orchestrator,
+            user_input=st.session_state.current_task,
+            clarification="already_audited",
+            manual_override=manual_override,
+            allow_complex_software_team=st.session_state.software_team_consent,
+            software_team_profile=st.session_state.software_team_profile,
+            supporting_materials=st.session_state.supporting_materials,
+            supporting_urls=st.session_state.supporting_urls,
+        )
         sync_state_from_result(result)
         st.session_state.retry_override = ""
     finally:
@@ -1714,6 +1849,7 @@ def render_review_panel():
     verification_status = str(latest.get("verification_status", "UNVERIFIED")).upper()
     verification_score = float(latest.get("verification_score", 0.0) or 0.0)
     verification_summary = str(latest.get("verification_summary", "") or "").strip()
+    verification_checks = latest.get("verification_checks", []) or []
     ship_readiness = str(latest.get("ship_readiness", "UNASSESSED")).upper()
     raw_avg_score = float(latest.get("raw_avg_score", latest.get("avg", 0.0)) or 0.0)
     calibrated_score = float(latest.get("avg", 0.0) or 0.0)
@@ -1723,6 +1859,23 @@ def render_review_panel():
     logic_confirmed = latest.get("logic_confirmed_defects", []) or []
     logic_risks = latest.get("logic_risks", []) or []
     logic_improvements = latest.get("logic_improvements", []) or []
+    software_team_used = bool(latest.get("software_team_active", False))
+    software_team_domains = latest.get("software_team_detected_domains", []) or latest.get("software_team_signals", []) or []
+    software_team_technologies = latest.get("software_team_detected_technologies", []) or []
+    software_team_roles = latest.get("software_team_roles", []) or latest.get("software_team_specialists", []) or []
+    software_team_reason = str(latest.get("software_team_reason", "") or latest.get("software_team_summary", "")).strip()
+    software_team_signal_reasons = latest.get("software_team_signal_reasons", []) or []
+    software_team_complexity_score = int(latest.get("software_team_complexity_score", 0) or 0)
+    software_team_complexity_level = str(latest.get("software_team_complexity_level", "standard") or "standard")
+    software_team_recommended = bool(latest.get("software_team_recommended", software_team_used))
+    software_team_approval_missing = bool(latest.get("software_team_approval_missing", False))
+    software_team_user_approved = bool(latest.get("software_team_user_approved", False))
+    software_team_profile = str(latest.get("software_team_profile", "") or "").strip()
+    software_team_estimated_cost_multiplier = float(latest.get("software_team_estimated_cost_multiplier", 1.0) or 1.0)
+    software_team_estimated_latency_multiplier = float(latest.get("software_team_estimated_latency_multiplier", 1.0) or 1.0)
+    software_team_architecture_summary = str(latest.get("software_team_architecture_summary", "") or "").strip()
+    software_team_specialist_summaries = latest.get("software_team_specialist_summaries", []) or []
+    software_team_role_models = dict(latest.get("software_team_role_models", {}) or {})
 
     status_note = (
         "The selected and fallback generation models were unavailable or rate-limited, so no valid solution was produced this round."
@@ -1804,6 +1957,16 @@ def render_review_panel():
                 st.warning(message_text)
             else:
                 st.info(message_text)
+        flagged_verification_checks = [
+            item for item in verification_checks
+            if str(item.get("status", "")).lower() in {"fail", "caution"}
+        ]
+        if flagged_verification_checks:
+            st.markdown("**Verification Checks**")
+            for item in flagged_verification_checks[:4]:
+                label = str(item.get("name", "check")).replace("_", " ").title()
+                detail = str(item.get("detail", "") or "").strip()
+                st.markdown(f"- **{label}**: {detail}")
 
         if latest.get("preflight_issues"):
             st.error("Preflight Findings")
@@ -1870,22 +2033,146 @@ def render_review_panel():
                 st.session_state.step = "negotiation"
                 st.rerun()
 
+    if st.session_state.task_mode == "Software & IT":
+        with st.expander("Software Architect Team", expanded=False):
+            if not software_team_used and not software_team_recommended:
+                st.caption("Not used for this task.")
+            elif software_team_approval_missing:
+                st.warning(
+                    "A larger software team was recommended for this task, but explicit approval was not present. "
+                    "The run stayed on the normal architect path."
+                )
+                summary_cards = st.columns(5)
+                summary_cards[0].metric("Recommendation", "Yes")
+                summary_cards[1].metric("Executed", "No")
+                summary_cards[2].metric("Complexity", software_team_complexity_level.replace("_", " ").title())
+                summary_cards[3].metric("Cost", f"{software_team_estimated_cost_multiplier:.2f}x")
+                summary_cards[4].metric("Time", f"{software_team_estimated_latency_multiplier:.2f}x")
+                if software_team_profile:
+                    st.caption(f"Recommended profile: {software_team_profile.replace('_', ' ').title()}")
+                if software_team_reason:
+                    st.caption(software_team_reason)
+                if software_team_domains:
+                    st.markdown("**Detected Domains**")
+                    st.caption(", ".join(software_team_domains))
+                if software_team_roles:
+                    st.markdown("**Recommended Roles**")
+                    render_list(software_team_roles)
+            else:
+                summary_cards = st.columns(7)
+                summary_cards[0].metric("Team Mode", "Used")
+                summary_cards[1].metric("Profile", software_team_profile.replace("_", " ").title() or "Standard")
+                summary_cards[2].metric("Complexity", software_team_complexity_level.replace("_", " ").title())
+                summary_cards[3].metric("Signal Score", f"{software_team_complexity_score}/4")
+                summary_cards[4].metric("Domains", len(software_team_domains))
+                summary_cards[5].metric("Cost", f"{software_team_estimated_cost_multiplier:.2f}x")
+                summary_cards[6].metric("Time", f"{software_team_estimated_latency_multiplier:.2f}x")
+                if software_team_reason:
+                    st.caption(software_team_reason)
+                if software_team_user_approved:
+                    st.caption("User approved the larger team path before execution.")
+                if software_team_domains:
+                    st.markdown("**Detected Domains**")
+                    st.caption(", ".join(software_team_domains))
+                if software_team_technologies:
+                    st.markdown("**Detected Technologies / Frameworks**")
+                    st.caption(", ".join(software_team_technologies))
+                if software_team_signal_reasons:
+                    st.markdown("**Activation Signals**")
+                    render_list(software_team_signal_reasons)
+                if software_team_roles:
+                    st.markdown("**Roles Selected**")
+                    render_list(software_team_roles)
+                if software_team_role_models:
+                    st.markdown("**Role To Model Routing**")
+                    for role, model in software_team_role_models.items():
+                        st.markdown(f"- **{role}** → `{model}`")
+                if software_team_architecture_summary:
+                    st.markdown("**Architecture Summary**")
+                    st.write(software_team_architecture_summary)
+                if software_team_specialist_summaries:
+                    st.markdown("**Specialist Snapshots**")
+                    for item in software_team_specialist_summaries:
+                        role = str(item.get("role", "Specialist") or "Specialist")
+                        top_line = str(item.get("top_recommendation", "") or item.get("scope", "")).strip()
+                        risk = str(item.get("risk", "") or "").strip()
+                        with st.container(border=True):
+                            st.markdown(f"**{role}**")
+                            if top_line:
+                                st.caption(top_line)
+                            if risk:
+                                st.markdown(f"- Risk: {risk}")
+
+    evidence_preview = dict(st.session_state.evidence_preview or {})
+    with st.expander("Evidence Context", expanded=False):
+        if not evidence_preview.get("source_count"):
+            st.caption("No supporting files or links were used for this task.")
+        else:
+            sources = list(evidence_preview.get("sources", []) or [])
+            retrieved_chunks = list(evidence_preview.get("retrieved_chunks", []) or [])
+            warnings = list(evidence_preview.get("warnings", []) or [])
+            summary_cards = st.columns(4)
+            summary_cards[0].metric("Sources", int(evidence_preview.get("source_count", 0) or 0))
+            summary_cards[1].metric("Retrieved Chunks", len(retrieved_chunks))
+            summary_cards[2].metric("Warnings", int(evidence_preview.get("warning_count", 0) or 0))
+            summary_cards[3].metric("RAG", "Used" if evidence_preview.get("rag_used") else "Idle")
+            if sources:
+                st.markdown("**Source Inventory**")
+                for source in sources[:8]:
+                    label = f"{source.get('name', 'source')} · {source.get('source_type', 'file')} · {source.get('char_count', 0)} chars"
+                    st.markdown(f"- {label}")
+            if warnings:
+                st.markdown("**Evidence Warnings**")
+                render_list(warnings)
+            if retrieved_chunks:
+                st.markdown("**Retrieved Evidence Excerpts**")
+                for chunk in retrieved_chunks[:6]:
+                    with st.container(border=True):
+                        st.caption(
+                            f"{chunk.get('source_name', 'source')} · chunk {int(chunk.get('index', 0)) + 1} · score {float(chunk.get('score', 0.0)):.2f}"
+                        )
+                        st.write(chunk.get("snippet", ""))
+
     with st.expander("Counsel Positions", expanded=False):
         counsel_left, counsel_right = st.columns(2)
         with counsel_left:
             with st.container(border=True):
                 st.markdown("**Technical Counsel**")
                 st.caption(normalize_visible_message(latest.get('tech_critique', 'No issues.')))
-                render_summary_cards([("Confirmed Defects", len(tech_confirmed))])
+                render_summary_cards(
+                    [
+                        ("Confirmed Defects", len(tech_confirmed)),
+                        ("Risks", len(tech_risks)),
+                        ("Repair Steps", len(latest.get("tech_repair_contract", []) or [])),
+                    ]
+                )
                 if tech_confirmed:
                     render_list(tech_confirmed[:3])
+                if tech_risks:
+                    st.caption("Top technical risk")
+                    st.markdown(f"- {tech_risks[0]}")
+                if latest.get("tech_repair_contract"):
+                    st.caption("Top technical repair step")
+                    st.markdown(f"- {latest.get('tech_repair_contract', [])[0]}")
         with counsel_right:
             with st.container(border=True):
                 st.markdown("**Logic Counsel**")
                 st.caption(normalize_visible_message(latest.get('logic_critique', 'No issues.')))
-                render_summary_cards([("Confirmed Defects", len(logic_confirmed))])
+                render_summary_cards(
+                    [
+                        ("Confirmed Defects", len(logic_confirmed)),
+                        ("Risks", len(logic_risks)),
+                        ("Repair Steps", len(latest.get("logic_repair_contract", []) or [])),
+                    ]
+                )
                 if logic_confirmed:
                     render_list(logic_confirmed[:3])
+                if logic_risks:
+                    st.caption("Top logic risk")
+                    st.markdown(f"- {logic_risks[0]}")
+                if latest.get("logic_repair_contract"):
+                    st.caption("Top logic repair step")
+                    st.markdown(f"- {latest.get('logic_repair_contract', [])[0]}")
 
     with st.expander("Review Transcript", expanded=False):
         st.markdown("**Technical Counsel**")
@@ -2093,6 +2380,18 @@ elif st.session_state.step in {"audit", "clarification"} or (
 if st.session_state.step == "input":
     input_guide = current_task_input_guide()
     with st.form("arbiter_input_form", clear_on_submit=False):
+        st.markdown(
+            """
+            <div class="arbiter-intake-header">
+                <div class="arbiter-intake-eyebrow">Case Intake</div>
+                <div class="arbiter-intake-title">Brief The Arbiter</div>
+                <div class="arbiter-intake-subtitle">
+                    Define the objective, constraints, and the output you want with enough specificity for a high-trust review.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.session_state.auto_mode_enabled = st.checkbox(
             "Autonomous mode",
             value=st.session_state.auto_mode_enabled,
@@ -2116,20 +2415,63 @@ if st.session_state.step == "input":
                 )
         task_input_key = f"task_input_{st.session_state.task_input_seq}"
         u_input = st.text_area(
-            "OVERRIDE COMMAND:",
+            "Task Brief",
             value=st.session_state.task_draft,
             placeholder=input_guide["placeholder"],
             height=150,
             key=task_input_key,
+            label_visibility="collapsed",
         )
-        submitted = st.form_submit_button("INITIALIZE COGNITIVE LOOP")
-    st.caption(input_guide["caption"])
-    st.caption("The Arbiter will either ask for missing context or confirm that the task is clear enough to proceed.")
+        action_cols = st.columns([1.55, 1.16, 0.2, 5.09], gap="small")
+        with action_cols[0]:
+            submitted = st.form_submit_button("Start Review", use_container_width=True)
+        with action_cols[1]:
+            uploaded_materials = st.file_uploader(
+                "Attach a File",
+                type=attachment_file_types(),
+                accept_multiple_files=True,
+                label_visibility="collapsed",
+                help="Attach supporting evidence files.",
+                width="stretch",
+            )
+        with action_cols[2]:
+            st.markdown(
+                """
+                <div class="arbiter-help-inline arbiter-intake-help">
+                    <span class="arbiter-help-icon" tabindex="0">?
+                        <span class="arbiter-help-bubble">
+                            Paste links directly into the main brief.
+                            <br><br>
+                            Supported files: PDF, DOCX, TXT, Markdown, JSON, CSV, HTML, SQL, XML, logs, and common code/text documents.
+                        </span>
+                    </span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    st.markdown(
+        f"""
+        <div class="arbiter-intake-note">
+            <span class="arbiter-intake-note-label">Best input:</span>
+            <span>{html.escape(input_guide["caption"])}</span>
+            <span class="arbiter-intake-note-separator">•</span>
+            <span>The Arbiter will either ask for missing context or confirm that the task is clear enough to proceed.</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    render_pending_supporting_materials()
     if submitted and u_input:
+        serialized_materials = [serialize_uploaded_material(item) for item in (uploaded_materials or [])]
+        parsed_urls = parse_supporting_urls(u_input)
         reset_run_state(keep_task_mode=True)
         st.session_state.task_draft = ""
         st.session_state.task_input_seq += 1
         st.session_state.current_task = u_input
+        st.session_state.supporting_materials = serialized_materials
+        st.session_state.supporting_urls = parsed_urls
+        st.session_state.supporting_urls_text = ""
+        st.session_state.evidence_preview = {}
         st.session_state.step = "audit"
         st.rerun()
 
@@ -2146,7 +2488,14 @@ elif st.session_state.step == "audit":
             max_iterations=0,      # don't iterate yet
             stable_mode=st.session_state.stable_mode,
         )
-        result = orchestrator.run(user_input=st.session_state.current_task)
+        result = run_orchestrator_safe(
+            orchestrator,
+            user_input=st.session_state.current_task,
+            allow_complex_software_team=st.session_state.software_team_consent,
+            software_team_profile=st.session_state.software_team_profile,
+            supporting_materials=st.session_state.supporting_materials,
+            supporting_urls=st.session_state.supporting_urls,
+        )
 
     merged_costs = dict(st.session_state.costs)
     for role, amount in result.costs.items():
@@ -2180,9 +2529,10 @@ elif st.session_state.step == "audit":
                 if reached_cap
                 else "Auditor began repeating the same clarification themes. Proceeding with the current context to avoid a loop."
             )
-            st.session_state.step = "negotiation"
-            st.session_state.pending_auto_run = True
-            st.session_state.run_in_progress = True
+            if not maybe_require_software_team_consent(st.session_state.current_task):
+                st.session_state.step = "negotiation"
+                st.session_state.pending_auto_run = True
+                st.session_state.run_in_progress = True
         else:
             st.session_state.pending_questions = new_questions or questions
             st.session_state.audit_question_history = history + list(st.session_state.pending_questions)
@@ -2196,9 +2546,10 @@ elif st.session_state.step == "audit":
         st.session_state.audit_round_count = 0
         st.session_state.audit_question_history = []
         st.session_state.audit_resolution_note = ""
-        st.session_state.step = "negotiation"
-        st.session_state.pending_auto_run = True
-        st.session_state.run_in_progress = True
+        if not maybe_require_software_team_consent(st.session_state.current_task):
+            st.session_state.step = "negotiation"
+            st.session_state.pending_auto_run = True
+            st.session_state.run_in_progress = True
         st.rerun()
 
 
@@ -2214,13 +2565,121 @@ elif st.session_state.step == "clarification":
     if clarify_submitted:
         if ans.strip():
             st.session_state.current_task += f"\nAdditional context:\n{ans.strip()}"
+            merged_urls = list(st.session_state.supporting_urls or [])
+            for url in parse_supporting_urls(ans):
+                if url not in merged_urls:
+                    merged_urls.append(url)
+            st.session_state.supporting_urls = merged_urls[:8]
         st.session_state.clarification_input_seq += 1
         st.session_state.step = "audit"
         st.rerun()
 
 
 # ════════════════════════════════════════════════
-# STEP 4: Negotiation (main debate loop)
+# STEP 4: Software Team Consent
+# ════════════════════════════════════════════════
+elif st.session_state.step == "team_consent":
+    preview = dict(st.session_state.software_team_preview or {})
+    roles = list(preview.get("suggested_roles", []) or [])
+    domains = list(preview.get("detected_domains", []) or [])
+    technologies = list(preview.get("detected_technologies", []) or [])
+    signal_reasons = list(preview.get("signal_reasons", []) or [])
+    complexity_score = int(preview.get("complexity_score", 0) or 0)
+    complexity_level = str(preview.get("complexity_level", "complex") or "complex").replace("_", " ").title()
+    profile_options = dict(preview.get("profile_options", {}) or {})
+    profile_ids = list(profile_options.keys()) or ["efficient", "dream"]
+    current_profile = str(st.session_state.software_team_profile or "").strip().lower()
+    if current_profile not in profile_ids:
+        current_profile = str(preview.get("recommended_profile", profile_ids[0]) or profile_ids[0])
+        st.session_state.software_team_profile = current_profile
+    selected_profile = st.radio(
+        "Specialist team profile",
+        options=profile_ids,
+        index=profile_ids.index(current_profile),
+        format_func=lambda value: str(profile_options.get(value, {}).get("label", value.replace("_", " ").title())),
+        horizontal=True,
+    )
+    st.session_state.software_team_profile = selected_profile
+    selected_profile_meta = dict(profile_options.get(selected_profile, {}) or {})
+    estimated_cost_multiplier = float(
+        selected_profile_meta.get("estimated_cost_multiplier", preview.get("estimated_cost_multiplier", 1.0)) or 1.0
+    )
+    estimated_latency_multiplier = float(
+        selected_profile_meta.get("estimated_latency_multiplier", preview.get("estimated_latency_multiplier", 1.0)) or 1.0
+    )
+    selected_profile_label = str(selected_profile_meta.get("label", selected_profile.replace("_", " ").title()) or "")
+    selected_profile_description = str(selected_profile_meta.get("description", "") or "").strip()
+    selected_role_models = dict(selected_profile_meta.get("role_models", {}) or {})
+    recommended_profile = str(preview.get("recommended_profile", "") or "").strip()
+
+    st.warning(
+        "This Software & IT task looks large enough to activate the Software Architect Team. "
+        "That increases coordination quality, but it also increases time and cost."
+    )
+    render_summary_cards(
+        [
+            ("Complexity", complexity_level),
+            ("Profile", selected_profile_label),
+            ("Signal Score", f"{complexity_score}/4"),
+            ("Domains", len(domains)),
+            ("Roles", len(roles)),
+            ("Cost Impact", f"{estimated_cost_multiplier:.2f}x"),
+            ("Time Impact", f"{estimated_latency_multiplier:.2f}x"),
+        ]
+    )
+    if recommended_profile:
+        st.caption(
+            f"Recommended profile: {str(profile_options.get(recommended_profile, {}).get('label', recommended_profile.replace('_', ' ').title()))}."
+        )
+    if selected_profile_description:
+        st.info(selected_profile_description)
+    reason = str(preview.get("reason", "") or "").strip()
+    if reason:
+        st.caption(reason)
+    if domains:
+        st.markdown("**Detected Domains**")
+        st.caption(", ".join(domains))
+    if technologies:
+        st.markdown("**Detected Technologies / Frameworks**")
+        st.caption(", ".join(technologies))
+    if signal_reasons:
+        st.markdown("**Why The Task Was Classified As Large**")
+        for item in signal_reasons:
+            st.markdown(f"- {item}")
+    if roles:
+        st.markdown("**Specialist Team That Will Be Activated**")
+        for role in roles:
+            st.markdown(f"- {role}")
+    if selected_role_models:
+        st.markdown("**Role To Model Routing**")
+        for role, model in selected_role_models.items():
+            st.markdown(f"- **{role}** → `{model}`")
+
+    st.session_state.software_team_warning_ack = st.checkbox(
+        f"I understand this task will use the {selected_profile_label} and may take longer and cost more than the standard architect path.",
+        value=st.session_state.software_team_warning_ack,
+    )
+
+    consent_cols = st.columns(2)
+    if consent_cols[0].button(f"Proceed With {selected_profile_label}", use_container_width=True):
+        if not st.session_state.software_team_warning_ack:
+            st.error("Please confirm that you accept the larger team, time, and cost impact before proceeding.")
+        else:
+            st.session_state.software_team_consent = True
+            st.session_state.step = "negotiation"
+            st.session_state.pending_auto_run = True
+            st.session_state.run_in_progress = True
+            st.rerun()
+    if consent_cols[1].button("Go Back And Simplify Scope", use_container_width=True):
+        st.session_state.task_draft = st.session_state.current_task or st.session_state.task_draft
+        st.session_state.step = "input"
+        st.session_state.pending_auto_run = False
+        st.session_state.run_in_progress = False
+        st.rerun()
+
+
+# ════════════════════════════════════════════════
+# STEP 5: Negotiation (main debate loop)
 # ════════════════════════════════════════════════
 elif st.session_state.step == "negotiation":
     round_number = max(int(st.session_state.iteration or 0) + 1, 1)
@@ -2302,6 +2761,24 @@ elif st.session_state.step == "negotiation":
                     st.rerun()
                 elif note_text:
                     st.warning("Project notes need one full app restart before saving is available.")
+
+        st.markdown("<div class='arbiter-run-actions'>", unsafe_allow_html=True)
+        action_cols = st.columns(2)
+        with action_cols[0]:
+            if st.button("EXECUTE COGNITIVE DEBATE", use_container_width=True):
+                st.session_state.pending_auto_run = True
+                st.session_state.run_in_progress = True
+                st.rerun()
+        with action_cols[1]:
+            generate_disabled = st.session_state.iteration <= 0
+            if st.button(
+                "GENERATE FINAL REPORT",
+                use_container_width=True,
+                disabled=generate_disabled,
+            ):
+                st.session_state.step = "export"
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     with col_opt:
         with st.container(border=True):
             st.markdown("**Run Profile**")
@@ -2314,6 +2791,22 @@ elif st.session_state.step == "negotiation":
                     ("Provider", st.session_state.provider_lock.upper()),
                 ]
             )
+        team_preview = dict(st.session_state.software_team_preview or {})
+        if team_preview.get("use_team"):
+            with st.container(border=True):
+                st.markdown("**Large Task Notice**")
+                selected_preview_profile = str(st.session_state.software_team_profile or team_preview.get("recommended_profile", "") or "").strip()
+                preview_profile_meta = dict((team_preview.get("profile_options", {}) or {}).get(selected_preview_profile, {}) or {})
+                render_summary_cards(
+                    [
+                        ("Team Mode", "Approved" if st.session_state.software_team_consent else "Pending"),
+                        ("Profile", selected_preview_profile.replace("_", " ").title() or "Pending"),
+                        ("Complexity", str(team_preview.get("complexity_level", "complex")).replace("_", " ").title()),
+                        ("Roles", len(team_preview.get("suggested_roles", []) or [])),
+                        ("Cost", f"{float(preview_profile_meta.get('estimated_cost_multiplier', team_preview.get('estimated_cost_multiplier', 1.0)) or 1.0):.2f}x"),
+                    ]
+                )
+                st.caption(str(team_preview.get("reason", "") or ""))
         st.session_state.benchmark_mode = False
 
     effective_auto_mode = bool(st.session_state.auto_mode_enabled)
@@ -2336,20 +2829,9 @@ elif st.session_state.step == "negotiation":
         )
         st.rerun()
 
-    if st.button("EXECUTE COGNITIVE DEBATE"):
-        st.session_state.pending_auto_run = True
-        st.session_state.run_in_progress = True
-        st.rerun()
-
-    if st.session_state.iteration > 0:
-        st.divider()
-        if st.button("GENERATE FINAL REPORT"):
-            st.session_state.step = "export"
-            st.rerun()
-
 
 # ════════════════════════════════════════════════
-# STEP 5: Export
+# STEP 6: Export
 # ════════════════════════════════════════════════
 elif st.session_state.step == "export":
     st.balloons()
@@ -2373,28 +2855,71 @@ elif st.session_state.step == "export":
         </div>
         """, unsafe_allow_html=True)
 
+    report_text = st.session_state.best_solution or st.session_state.current_solution
+    export_metadata = {
+        "Run ID": st.session_state.run_id or "untracked",
+        "Task Mode": st.session_state.task_mode,
+        "Iterations": st.session_state.iteration,
+        "Total Cost USD": st.session_state.costs.get("Total", 0.0),
+        "Evidence Sources": len(st.session_state.supporting_materials or []),
+    }
+    if st.session_state.best_iteration:
+        export_metadata.update(
+            {
+                "Best Iteration": st.session_state.best_iteration.get("iter", ""),
+                "Technical Score": st.session_state.best_iteration.get("tech", ""),
+                "Logic Score": st.session_state.best_iteration.get("logic", ""),
+                "Average Score": st.session_state.best_iteration.get("avg", ""),
+            }
+        )
+
+    csv_output = export_solution_csv(report_text, metadata=export_metadata)
+    xlsx_output = export_solution_xlsx(report_text, metadata=export_metadata)
+
+    col_pdf, col_csv, col_xlsx = st.columns(3)
+
     if FPDF is None:
-        st.info("PDF export is unavailable because `fpdf` is not installed in this Python environment.")
+        col_pdf.info("PDF export is unavailable because `fpdf2` is not installed.")
     else:
         import re as _re
+
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", size=12)
-        report_text = st.session_state.best_solution or st.session_state.current_solution
-        clean_text  = _re.sub(r"<[^>]*>", "", report_text)
-        pdf.multi_cell(0, 10, txt=clean_text.encode("latin-1", "replace").decode("latin-1"))
-        pdf_output  = pdf.output(dest="S")
+        clean_text = _re.sub(r"<[^>]*>", "", report_text)
+        pdf.multi_cell(0, 10, text=clean_text.encode("latin-1", "replace").decode("latin-1"))
+        pdf_output = pdf.output()
         if isinstance(pdf_output, str):
             pdf_output = pdf_output.encode("latin-1")
         else:
             pdf_output = bytes(pdf_output)
 
-        st.download_button(
+        col_pdf.download_button(
             label="DOWNLOAD REPORT (PDF)",
             data=pdf_output,
             file_name="The_Arbiter_Report.pdf",
             mime="application/pdf",
+            use_container_width=True,
         )
+
+    col_csv.download_button(
+        label="DOWNLOAD REPORT (CSV)",
+        data=csv_output,
+        file_name="The_Arbiter_Report.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    col_xlsx.download_button(
+        label="DOWNLOAD REPORT (XLSX)",
+        data=xlsx_output,
+        file_name="The_Arbiter_Report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    st.caption(
+        "Spreadsheet exports preserve markdown tables when present and fall back to a clean section-by-section workbook when the answer is prose."
+    )
 
     if st.button("RESTART SYSTEM"):
         st.session_state.clear()

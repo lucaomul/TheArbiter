@@ -2,6 +2,8 @@ import time
 
 from arbiter.config.settings import SETTINGS
 from arbiter.core.iteration_engine import IterationEngine
+from arbiter.models.team import TeamRoutingDecision
+from arbiter.models.state import ArbiterState
 
 
 class FakeRegistry:
@@ -88,3 +90,64 @@ def test_parallel_critics_return_results_even_when_completion_order_differs(monk
     assert l_model == "logic-model"
     assert t_res["score"] == 8
     assert l_res["score"] == 7
+
+
+def test_janitor_payload_includes_software_team_context_when_active():
+    state = ArbiterState(user_input="Build a platform", task_mode="Software & IT")
+    state.software_team_plan = {
+        "use_team": True,
+        "detected_domains": ["backend", "frontend", "database"],
+        "roles": ["Lead Software Architect", "Backend Architect", "Frontend Architect"],
+        "architecture_summary": "Split the build into clear backend, frontend, and persistence lanes.",
+        "cross_team_handoffs": [
+            "Backend Architect: publish the REST contract before frontend integration.",
+            "Frontend Architect: align field names with backend payloads.",
+        ],
+        "main_risks": ["API drift could break the UI."],
+        "specialist_summaries": [
+            {"role": "Backend Architect", "top_recommendation": "Define the service contract first."},
+            {"role": "Frontend Architect", "top_recommendation": "Use the shared contract for UI state."},
+        ],
+    }
+
+    payload = IterationEngine._build_janitor_payload(
+        state=state,
+        proposal="demo solution",
+        preflight_issues=["Missing validation"],
+        t_res=_critic_result(6, "Missing validation"),
+        l_res=_critic_result(7, "Broken fallback flow"),
+    )
+
+    assert "SOFTWARE TEAM DOMAINS" in payload
+    assert "SOFTWARE TEAM ROLES" in payload
+    assert "CROSS-TEAM HANDOFFS" in payload
+    assert "SPECIALIST SNAPSHOTS" in payload
+
+
+def test_complex_team_recommendation_requires_explicit_approval():
+    engine = IterationEngine(FakeRegistry(), auto_mode=False)
+    state = ArbiterState(user_input="Build a full-stack platform", task_mode="Software & IT")
+    state.software_team_user_approved = False
+
+    engine.software_team.route = lambda task_mode, user_input: TeamRoutingDecision(
+        use_team=True,
+        reason="Complex software task detected.",
+        detected_domains=["backend", "frontend", "database"],
+        detected_technologies=["python", "react", "sql"],
+        signal_reasons=["3 software domains", "multiple languages/frameworks"],
+        suggested_roles=["Lead Software Architect", "Backend Architect", "Frontend Architect"],
+        complexity_score=3,
+        complexity_level="complex",
+        estimated_team_size=3,
+        estimated_cost_multiplier=1.4,
+        estimated_latency_multiplier=1.2,
+        requires_confirmation=True,
+    )
+
+    plan = engine._ensure_software_team_plan(state)
+
+    assert plan["recommended"] is True
+    assert plan["approval_missing"] is True
+    assert plan["use_team"] is False
+    assert plan["user_approved"] is False
+    assert "normal architect path" in plan["reason"].lower()

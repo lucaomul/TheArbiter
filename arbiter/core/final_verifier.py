@@ -7,6 +7,16 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from arbiter.config.settings import TASK_PROFILES
+from arbiter.core.grounding import (
+    extract_response_quotes,
+    find_unsupported_external_claims,
+    quotes_supported_by_sources,
+    response_has_quotes,
+    response_has_sources,
+    response_mentions_source_name,
+    task_expects_quotes,
+    task_expects_sources,
+)
 
 
 @dataclass
@@ -29,6 +39,7 @@ class FinalVerifier:
         tech_confirmed_defects: Optional[list] = None,
         logic_confirmed_defects: Optional[list] = None,
         provider_error: bool = False,
+        evidence_bundle=None,
     ) -> VerificationResult:
         if provider_error:
             return VerificationResult(
@@ -66,6 +77,14 @@ class FinalVerifier:
             checks.extend(self._verify_planning(task_text, raw, explicit_code_request))
         else:
             checks.extend(self._verify_general(task_text, raw, explicit_code_request))
+
+        if validator_type != "software" and not explicit_code_request:
+            checks.extend(self._verify_grounding(task_text, raw))
+
+        if task_expects_sources(task_text):
+            checks.extend(self._verify_expected_sources(raw, evidence_bundle=evidence_bundle))
+        if task_expects_quotes(task_text):
+            checks.extend(self._verify_expected_quotes(raw, evidence_bundle=evidence_bundle))
 
         if self._expects_json(task_text):
             checks.extend(self._verify_expected_json(raw))
@@ -383,6 +402,83 @@ class FinalVerifier:
                 "pass" if len(raw.split()) >= 120 else "caution",
                 "The answer has enough depth to inspect." if len(raw.split()) >= 120 else "The answer is still relatively thin for a fully trusted response.",
             ),
+        ]
+
+    def _verify_grounding(self, task_text: str, raw: str) -> list[dict]:
+        samples = find_unsupported_external_claims(task_text, raw, max_samples=2)
+        if not samples:
+            return [
+                self._check(
+                    "grounding_discipline",
+                    "pass",
+                    "No unsupported external statistics or research claims were detected.",
+                )
+            ]
+        return [
+            self._check(
+                "grounding_discipline",
+                "caution",
+                "The response presents precise external facts or statistics without a cited source or clearly labeled assumption. "
+                + "Examples: "
+                + " | ".join(samples),
+            )
+        ]
+
+    @staticmethod
+    def _verify_expected_sources(raw: str, *, evidence_bundle=None) -> list[dict]:
+        source_names = []
+        if evidence_bundle is not None:
+            source_names = [item.name for item in getattr(evidence_bundle, "sources", [])]
+        if response_has_sources(raw) or response_mentions_source_name(raw, source_names):
+            return [
+                FinalVerifier._check(
+                    "expected_sources",
+                    "pass",
+                    "The response includes explicit source markers or cites one of the attached sources.",
+                )
+            ]
+        return [
+            FinalVerifier._check(
+                "expected_sources",
+                "caution",
+                "The task asked for sources or citations, but the response did not include clear source markers or reference links.",
+            )
+        ]
+
+    @staticmethod
+    def _verify_expected_quotes(raw: str, *, evidence_bundle=None) -> list[dict]:
+        quotes = extract_response_quotes(raw)
+        if quotes and evidence_bundle is not None:
+            source_texts = [item.extracted_text for item in getattr(evidence_bundle, "sources", [])]
+            if quotes_supported_by_sources(quotes, source_texts):
+                return [
+                    FinalVerifier._check(
+                        "expected_quotes",
+                        "pass",
+                        "The response includes quoted evidence that aligns with the provided source material.",
+                    )
+                ]
+            return [
+                FinalVerifier._check(
+                    "expected_quotes",
+                    "caution",
+                    "Quoted text was provided, but at least one quote could not be matched against the attached source material.",
+                )
+            ]
+        if response_has_quotes(raw):
+            return [
+                FinalVerifier._check(
+                    "expected_quotes",
+                    "pass",
+                    "The response includes explicit quote markers or quoted evidence.",
+                )
+            ]
+        return [
+            FinalVerifier._check(
+                "expected_quotes",
+                "caution",
+                "The task asked for direct quotes or quoted evidence, but the response did not include clear quote markers.",
+            )
         ]
 
     @staticmethod

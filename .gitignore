@@ -2,6 +2,12 @@
 venv/
 .venv/
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
 *.mp4
 *.webm
 *.pdf
@@ -12,3 +18,4 @@ arbiter.db
 *.sqlite3
 evals/results/
 *.egg-info/
+Users/

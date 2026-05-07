@@ -19,6 +19,20 @@ python -m pip install -e ".[dev,api,chromadb]"
 
 ## Main Commands
 
+If you prefer short commands, the root `Makefile` wraps the common workflow:
+
+```bash
+make install-dev
+make lint
+make test
+make eval-dry-run
+make app
+make dashboard
+make api
+```
+
+If `.venv/bin/python` exists, the Makefile uses it automatically.
+
 ### Run the Streamlit workspace
 
 ```bash
@@ -62,8 +76,43 @@ The repo is intentionally tolerant of missing optional packages:
 - no `chromadb` -> native memory still works
 - no API/DB extras -> Streamlit app still works
 - no DB driver -> persistence disables itself instead of crashing
+- no `pypdf` -> PDF uploads degrade honestly with an ingestion warning instead of pretending extraction worked
 
 When adding new optional features, preserve that pattern.
+
+## Evidence Ingestion Notes
+
+The product now supports supporting files, links, and lightweight local RAG.
+
+Current file/link behavior:
+- `PDF`, `DOCX`, `TXT`, `MD`, `JSON`, `CSV`, HTML, and code/text documents can be attached in Streamlit
+- API callers can send `supporting_urls` and `supporting_materials`
+- long sources are chunked and ranked against the active task before prompt injection
+- final answers can be exported as `PDF`, `CSV`, or `XLSX`
+- markdown tables are preserved into spreadsheet exports when available
+
+Implementation goals:
+- no fake grounding
+- no hidden source use
+- explicit warnings when extraction fails or a dependency is missing
+
+## Benchmark Store Path Controls
+
+Benchmark history defaults to `.arbiter_memory/benchmark_runs.jsonl`.
+
+If you need to redirect it, use:
+
+```bash
+export ARBITER_BENCHMARK_DIR=/path/to/benchmark_dir
+```
+
+or:
+
+```bash
+export ARBITER_BENCHMARK_PATH=/path/to/benchmark_runs.jsonl
+```
+
+If the configured location is not writable, the benchmark store falls back to a temp-backed path and reports that status in analytics.
 
 ## Adding a New Task Mode
 
@@ -126,6 +175,7 @@ If you change memory semantics, add tests for:
 - `pyproject.toml` is the primary packaging source of truth
 - `requirements.txt` remains for backwards compatibility
 - contributor installs should prefer editable extras
+- CI runs on Python `3.10` and `3.11`
 
 Useful install paths:
 

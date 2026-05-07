@@ -9,8 +9,10 @@ description = "Multi-agent LLM orchestration framework for critique, iteration, 
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+  "fpdf2>=2.8",
   "openai>=1.30",
   "plotly>=5.22",
+  "pypdf>=5.0",
   "python-dotenv>=1.0",
   "streamlit>=1.32",
 ]

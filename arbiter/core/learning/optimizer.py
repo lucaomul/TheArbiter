@@ -21,9 +21,13 @@ class LearningOptimizer:
         if replacement:
             return replacement
         for candidate in registry.candidates_for_role("Architect"):
-            if candidate.quality_tier == "high" and registry.is_selectable(candidate.model_id, "Architect"):
-                return candidate.model_id
+                if candidate.quality_tier == "high" and registry.is_selectable(candidate.model_id, "Architect"):
+                    return candidate.model_id
         return resolved or SETTINGS.architect_model
+
+    @classmethod
+    def quality_architect_model(cls) -> str:
+        return cls._quality_architect_model()
 
     def optimize(self, state: ArbiterState) -> dict:
         if getattr(state, "stable_mode", False):

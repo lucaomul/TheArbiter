@@ -17,6 +17,9 @@ The Arbiter is a governed multi-agent loop for tasks where answer quality matter
 User Brief
    |
    v
+Evidence ingestion + retrieval (optional)
+   |
+   v
 Auditor
    |---- needs clarification ----> User clarification -> Auditor
    |
@@ -55,6 +58,37 @@ Score calibration + readiness decision
 - follows task-mode guidance and delivery contracts
 - is the main target of the retry loop
 
+### Dynamic Software Architect Team
+For larger `Software & IT` tasks, the Architect step can expand into a specialist planning pod instead of staying single-threaded.
+
+Activation is additive and gated:
+- task mode must be `Software & IT`
+- the router must detect enough complexity signals
+- simple coding tasks stay on the normal Architect path
+
+Core specialist roles:
+- `Lead Software Architect`
+- `Backend Architect`
+- `Frontend Architect`
+- `Database Architect`
+- `DevOps & Reliability Architect`
+
+Optional specialist roles:
+- `Security Architect`
+- `QA/Test Architect`
+- `Integration Architect`
+- `Performance Architect`
+
+The flow is:
+1. team router inspects the brief
+2. if the task is large enough, the UI can require explicit user approval before the expanded team path is used
+3. lead specialist publishes a shared architecture blueprint
+4. other specialists work in parallel when safe
+5. the plans are synthesized into one implementation-oriented software package
+6. the existing critics, Janitor, verifier, and stopping logic stay unchanged
+
+This improves large software-task quality by giving the downstream review loop clearer subsystem boundaries, better handoffs, and more explicit implementation order.
+
 ### Tech Critic
 - checks implementation rigor, operational feasibility, execution quality, and technical defects
 
@@ -72,10 +106,26 @@ Score calibration + readiness decision
 
 ## Data Flow
 
+### Evidence layer
+The input path can now carry supporting materials instead of only raw prompt text.
+
+Supported evidence inputs:
+- uploaded files such as PDF, DOCX, TXT, Markdown, JSON, CSV, and code/text documents
+- URL-based reference material
+
+Evidence flow:
+1. extract readable text from each source
+2. chunk large sources into smaller passages
+3. rank chunks against the active task with a lightweight local retrieval pass
+4. inject the top excerpts into the Architect-facing task payload
+5. surface source names, warnings, and retrieved snippets in the UI/API
+6. use attached-source metadata during verification for source/quote-sensitive tasks
+
 ### 1. Intake state
 The orchestrator creates an `ArbiterState` object that carries:
 - user input
 - task mode
+- optional evidence bundle
 - selected models
 - iteration history
 - costs
@@ -114,7 +164,7 @@ The Arbiter intentionally distinguishes:
 
 - `Critic Average`
   - raw weighted score from Tech Critic and Logic Critic
-- `Calibrated Score`
+- `Final Verified Score`
   - final round score after verification pressure
 - `Verification Status`
   - `VERIFIED`, `CAUTION`, `FAILED`, `BLOCKED`

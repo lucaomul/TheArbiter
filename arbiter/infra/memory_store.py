@@ -233,6 +233,8 @@ class MemoryStore:
         repairs = (entry.get("tech_repair_contract", []) + entry.get("logic_repair_contract", []))[:6]
         if repairs:
             lines.append("Repair lessons: " + "; ".join(repairs))
+        if entry.get("memory_trust_flags"):
+            lines.append("Trust flags: " + "; ".join(entry.get("memory_trust_flags", [])[:4]))
         lines.append("Average score: " + str(entry.get("avg_score", 0.0)))
         return "\n".join(lines)[:4000]
 
@@ -346,6 +348,24 @@ class MemoryStore:
             return "active"
         return "caution"
 
+    @staticmethod
+    def _trust_flags_from_verification(verification_checks: Optional[List[Dict]]) -> List[str]:
+        trust_sensitive_checks = {
+            "grounding_discipline",
+            "expected_sources",
+            "expected_quotes",
+            "expected_json_output",
+            "expected_sql_output",
+            "deliverable_shape",
+        }
+        flags = []
+        for item in list(verification_checks or []):
+            name = str(item.get("name", "") or "").strip()
+            status = str(item.get("status", "") or "").strip().lower()
+            if name in trust_sensitive_checks and status in {"caution", "fail"} and name not in flags:
+                flags.append(name)
+        return flags
+
     def _entry_similarity(self, current_task_tokens: set, current_issue_tokens: set, entry: Dict, task_mode: str) -> float:
         entry_task_tokens = set(entry.get("task_tokens", []))
         entry_issue_tokens = set(entry.get("issue_tokens", []))
@@ -409,6 +429,7 @@ class MemoryStore:
         validity_status: str,
         score_status: str,
         verification_status: str = "UNVERIFIED",
+        verification_checks: Optional[List[Dict]] = None,
         limit: int = 3,
     ) -> Dict:
         related = self.retrieve_relevant(task_mode, task_text, unresolved_issues={
@@ -451,6 +472,7 @@ class MemoryStore:
 
         status = "ACCEPT"
         reasons = []
+        trust_flags = self._trust_flags_from_verification(verification_checks)
 
         if validity_status != "VALID":
             status = "ACCEPT_WITH_CAUTION"
@@ -468,6 +490,14 @@ class MemoryStore:
             status = "ACCEPT_WITH_CAUTION"
             reasons.append("Deterministic verification did not fully clear this result.")
 
+        if trust_flags:
+            status = "ACCEPT_WITH_CAUTION"
+            reasons.append(
+                "Verification flagged trust-sensitive issues: "
+                + ", ".join(flag.replace("_", " ") for flag in trust_flags[:3])
+                + "."
+            )
+
         if conflict_reasons and validity_status == "VALID":
             status = "CONFLICT"
             reasons.extend(conflict_reasons[:2])
@@ -484,6 +514,7 @@ class MemoryStore:
             "consensus_score": round(consensus_score, 3),
             "reasons": reasons[:3],
             "related_memory_ids": [item for item in related_ids if item][:5],
+            "trust_flags": trust_flags[:5],
         }
 
     def record_iteration(
@@ -506,6 +537,7 @@ class MemoryStore:
         verification_status: str = "UNVERIFIED",
         verification_score: float = 0.0,
         verification_summary: str = "",
+        verification_checks: Optional[List[Dict]] = None,
         ship_readiness: str = "UNASSESSED",
         run_id: str = "",
         source_trace: Optional[Dict] = None,
@@ -520,6 +552,7 @@ class MemoryStore:
             validity_status=validity_status,
             score_status=score_status,
             verification_status=verification_status,
+            verification_checks=verification_checks,
         )
 
         task_tokens = self._tokenize(task_text)
@@ -540,6 +573,7 @@ class MemoryStore:
             "verification_status": verification_status,
             "verification_score": float(verification_score or 0.0),
             "verification_summary": str(verification_summary or "")[:320],
+            "verification_checks": list(verification_checks or [])[:6],
             "ship_readiness": str(ship_readiness or "UNASSESSED"),
             "preflight_issues": list(preflight_issues or [])[:6],
             "tech_issues": list(tech_issues or [])[:6],
@@ -553,6 +587,7 @@ class MemoryStore:
             "memory_lifecycle": self._memory_lifecycle(verdict["status"], validity_status, score_status),
             "consensus_score": verdict["consensus_score"],
             "memory_reasons": verdict["reasons"],
+            "memory_trust_flags": verdict.get("trust_flags", []),
             "related_memory_ids": verdict["related_memory_ids"],
             "source_trace": source_trace or {
                 "architect_model": architect_model,
@@ -592,6 +627,7 @@ class MemoryStore:
             task_score = self._overlap_score(task_tokens, entry_task_tokens)
             issue_score = self._overlap_score(unresolved_tokens, entry_issue_tokens)
             quality_bonus = min(float(entry.get("avg_score", 0.0)) / 10.0, 1.0) * 0.15
+            trust_penalty = -0.12 if entry.get("memory_trust_flags") else 0.0
             lifecycle = entry.get("memory_lifecycle", "caution")
             lifecycle_bonus = {
                 "active": 0.15,
@@ -599,7 +635,7 @@ class MemoryStore:
                 "conflicted": -0.10,
                 "obsolete": -1.0,
             }.get(lifecycle, 0.0)
-            total = mode_bonus + task_score + issue_score + quality_bonus + lifecycle_bonus
+            total = mode_bonus + task_score + issue_score + quality_bonus + lifecycle_bonus + trust_penalty
             if total > 0.2:
                 ranked.append((total, entry))
 

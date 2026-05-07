@@ -1,6 +1,8 @@
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
+from arbiter.models.evidence import EvidenceBundle
+
 
 @dataclass
 class IterationRecord:
@@ -48,6 +50,27 @@ class IterationRecord:
     architect_model: str = ""
     tech_model: str = ""
     logic_model: str = ""
+    software_team_active: bool = False
+    software_team_complexity_score: int = 0
+    software_team_signals: list[str] = field(default_factory=list)
+    software_team_specialists: list[str] = field(default_factory=list)
+    software_team_summary: str = ""
+    software_team_detected_domains: list[str] = field(default_factory=list)
+    software_team_detected_technologies: list[str] = field(default_factory=list)
+    software_team_roles: list[str] = field(default_factory=list)
+    software_team_reason: str = ""
+    software_team_signal_reasons: list[str] = field(default_factory=list)
+    software_team_complexity_level: str = "standard"
+    software_team_recommended: bool = False
+    software_team_approval_missing: bool = False
+    software_team_user_approved: bool = False
+    software_team_profile: str = ""
+    software_team_estimated_cost_multiplier: float = 1.0
+    software_team_estimated_latency_multiplier: float = 1.0
+    software_team_requires_confirmation: bool = False
+    software_team_architecture_summary: str = ""
+    software_team_specialist_summaries: list[dict] = field(default_factory=list)
+    software_team_role_models: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -95,6 +118,9 @@ class ArbiterState:
     task_complexity: str = "normal"
     constraints: list[str] = field(default_factory=list)
     model_usage: list[dict] = field(default_factory=list)
+    software_team_plan: dict = field(default_factory=dict)
+    software_team_profile: str = ""
+    evidence_bundle: Optional[EvidenceBundle] = None
 
     # Costs
     costs: dict = field(default_factory=lambda: {
