@@ -9,7 +9,7 @@ It is built for operators who want more than "send prompt, hope for the best."
 
 ## Product Tour
 
-![The Arbiter product tour](docs/assets/arbiter-demo.gif)
+
 
 This is a simulated walkthrough built from real interface captures and representative product states.
 Live runs can take longer than the GIF suggests depending on task complexity, provider availability, rate limits, evidence size, and whether the larger software team path is activated.
