@@ -23,7 +23,13 @@ class BaseAgent:
         self._last_call_metadata = {}
         self._last_result = None
 
-    def run(self, user_prompt: str, history: str = "", force_json: bool = False) -> str:
+    def run(
+        self,
+        user_prompt: str,
+        history: str = "",
+        force_json: bool = False,
+        llm_options: Optional[dict] = None,
+    ) -> str:
         full_prompt = (
             f"=== PREVIOUS ITERATION CONTEXT ===\n{history}\n\n"
             f"=== CURRENT TASK ===\n{user_prompt}"
@@ -65,6 +71,7 @@ class BaseAgent:
             force_json=force_json and self.provider == "openai",
             temperature=0.1 if self.name != "Architect" else 0.4,
             agent_name=self.name,
+            **dict(llm_options or {}),
         )
         self._last_call_metadata = self._client.get_last_call_metadata()
         self._last_result = response_result
@@ -427,9 +434,45 @@ class AuditorAgent(BaseAgent):
 
         return {"clear": True, "questions": []}
 
-    def audit(self, task: str) -> dict:
-        raw = self.run(task, force_json=False)
+    @staticmethod
+    def _provider_warning(result: dict) -> str:
+        provider = str(result.get("provider", "provider") or "provider").upper()
+        model = str(result.get("model", "selected model") or "selected model")
+        error_type = str(result.get("error_type", "provider_error") or "provider_error")
+        retry_after = result.get("retry_after_seconds")
+        if error_type == "rate_limit":
+            suffix = ""
+            if retry_after is not None:
+                try:
+                    retry_after = max(0, int(float(retry_after)))
+                    mins, secs = divmod(retry_after, 60)
+                    suffix = f" Retry in about {mins}m {secs}s." if mins else f" Retry in about {secs}s."
+                except Exception:
+                    suffix = ""
+            return (
+                f"The Auditor hit a provider rate limit on {provider} for `{model}`."
+                f"{suffix} The case can continue, but intake review was degraded."
+            )
+        return (
+            f"The Auditor could not complete its preferred intake check on {provider} for `{model}`. "
+            "The case can continue, but intake review was degraded."
+        )
+
+    def audit(self, task: str, llm_options: Optional[dict] = None) -> dict:
+        raw = self.run(task, force_json=False, llm_options=llm_options)
         result = self.clean_json(raw)
+        if isinstance(result, dict) and result.get("provider_error"):
+            return {
+                "clear": True,
+                "questions": [],
+                "provider_error": True,
+                "provider_limited": str(result.get("error_type", "") or "") == "rate_limit",
+                "warning": self._provider_warning(result),
+                "error_type": str(result.get("error_type", "provider_error") or "provider_error"),
+                "retry_after_seconds": result.get("retry_after_seconds"),
+                "provider": result.get("provider", ""),
+                "model": result.get("model", ""),
+            }
         if result.get("parse_error"):
             return self._recover_audit_result(task, raw)
         clear = bool(result.get("clear", True))
@@ -437,10 +480,17 @@ class AuditorAgent(BaseAgent):
         if not isinstance(questions, list):
             questions = [str(questions)]
         questions = [str(item).strip() for item in questions if str(item).strip()][:3]
+        warning = str(result.get("warning", "") or "").strip()
         if clear:
-            return {"clear": True, "questions": []}
+            payload = {"clear": True, "questions": []}
+            if warning:
+                payload["warning"] = warning
+            return payload
         if questions:
-            return {"clear": False, "questions": questions}
+            payload = {"clear": False, "questions": questions}
+            if warning:
+                payload["warning"] = warning
+            return payload
         return self._recover_audit_result(task, raw)
 
 

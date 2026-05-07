@@ -16,7 +16,7 @@ from arbiter.infra.model_selector import get_model_selector
 from arbiter.infra.performance_store import get_performance_store
 from arbiter.infra.decision_log import DecisionLog
 from arbiter.config.settings import PRICES, SETTINGS
-from arbiter.infra.plugin_registry import provider_for_model
+from arbiter.infra.plugin_registry import get_plugin_registry, provider_for_model
 from arbiter.infra.structured_logging import get_logger
 
 logger = get_logger(__name__)
@@ -37,14 +37,41 @@ class AgentRunner:
         self._last_call_metadata: dict[str, dict] = {}
 
     def run_auditor(self, task: str, context: dict = None) -> dict:
+        context = dict(context or {})
         prompt = self.registry.get("Auditor")
         attempted = []
-        for model in self._candidate_models("Auditor", context):
+        provider_failures = []
+        llm_options = {
+            "max_retries": int(context.get("auditor_max_retries", SETTINGS.auditor_rate_limit_retries)),
+            "request_timeout_seconds": int(
+                context.get("auditor_request_timeout_seconds", SETTINGS.auditor_request_timeout_seconds)
+            ),
+        }
+        for model in self._auditor_candidate_models(context):
             attempted.append(model)
             agent = AuditorAgent(model=model, system_prompt=prompt)
-            result = agent.audit(task)
+            result = agent.audit(task, llm_options=llm_options)
             self._capture_call_metadata("Auditor", agent)
-            if not result.get("provider_error"):
+            if result.get("provider_error"):
+                self._handle_provider_error(model, result)
+                provider_failures.append(
+                    {
+                        "model": model,
+                        "provider": provider_for_model(model, ""),
+                        "error_type": str(result.get("error_type", "provider_error") or "provider_error"),
+                        "retry_after_seconds": result.get("retry_after_seconds"),
+                    }
+                )
+                continue
+
+            if provider_failures:
+                result = dict(result or {})
+                result["fallback_used"] = True
+                result["attempted_models"] = list(attempted)
+                if not result.get("warning"):
+                    result["warning"] = (
+                        f"The Auditor switched to `{model}` after provider pressure on the initial intake lane."
+                    )
                 logger.info(
                     "auditor_completed",
                     extra={
@@ -52,11 +79,23 @@ class AgentRunner:
                         "agent_name": "Auditor",
                         "model": model,
                         "provider": provider_for_model(model, ""),
+                        "fallback_used": True,
+                        "attempted_models": list(attempted),
                     },
                 )
                 return result, model
-            self._handle_provider_error(model, result)
-        return result, attempted[-1] if attempted else ""
+            logger.info(
+                "auditor_completed",
+                extra={
+                    "iteration": self.current_iteration,
+                    "agent_name": "Auditor",
+                    "model": model,
+                    "provider": provider_for_model(model, ""),
+                },
+            )
+            return result, model
+
+        return self._degraded_auditor_result(provider_failures, attempted), attempted[-1] if attempted else ""
 
     def run_architect(self, task: str, history: str = "", context: dict = None) -> str:
         prompt = self.registry.get("Architect")
@@ -262,6 +301,78 @@ class AgentRunner:
                 unique.append(model)
                 seen.add(model)
         return unique or self._candidate_models(agent, context)
+
+    def _auditor_candidate_models(self, context: dict = None) -> list[str]:
+        context = dict(context or {})
+        ordered = list(self._candidate_models("Auditor", context))
+        if not context.get("allow_provider_fallback", SETTINGS.auditor_provider_fallback_enabled):
+            return ordered
+
+        registry = get_plugin_registry()
+        preferred = [
+            "gemini-2.5-flash",
+            "claude-3-5-haiku-latest",
+            "gpt-4o-mini",
+            "gemini-2.5-pro",
+            "claude-sonnet-4-20250514",
+            "llama-3.1-8b-instant",
+            "llama-3.3-70b-versatile",
+        ]
+        extra = list(preferred)
+        extra.extend(plugin.model_id for plugin in registry.candidates_for_role("Auditor"))
+
+        seen = set()
+        unique = []
+        for model in ordered + extra:
+            model = str(model or "").strip()
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            if not registry.is_selectable(model, "Auditor"):
+                continue
+            if self.selector.is_temporarily_unavailable(model):
+                continue
+            unique.append(model)
+        return unique or ordered
+
+    @staticmethod
+    def _degraded_auditor_result(provider_failures: list[dict], attempted_models: list[str]) -> dict:
+        last_failure = dict(provider_failures[-1] if provider_failures else {})
+        retry_after = last_failure.get("retry_after_seconds")
+        base_message = (
+            "The Auditor could not complete a normal intake pass because the available providers were limited. "
+            "The case can still proceed, but intake review was degraded."
+        )
+        if last_failure.get("error_type") == "rate_limit" and retry_after:
+            try:
+                total = max(0, int(float(retry_after)))
+                minutes, seconds = divmod(total, 60)
+                retry_label = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+                base_message = (
+                    f"{base_message} The last retry window reported by the provider was about {retry_label}."
+                )
+            except Exception:
+                pass
+        return {
+            "clear": True,
+            "questions": [],
+            "provider_error": True,
+            "provider_limited": any(
+                str(item.get("error_type", "") or "") == "rate_limit" for item in provider_failures
+            ),
+            "warning": base_message,
+            "error_type": str(last_failure.get("error_type", "provider_error") or "provider_error"),
+            "retry_after_seconds": retry_after,
+            "attempted_models": list(attempted_models),
+            "attempted_providers": sorted(
+                {
+                    str(item.get("provider", "") or "")
+                    for item in provider_failures
+                    if str(item.get("provider", "") or "").strip()
+                }
+            ),
+            "fallback_used": len(attempted_models) > 1,
+        }
 
     def _attempt_repair(self, raw_output: str) -> Optional[dict]:
         prompt = self.registry.get("JSON Repair")

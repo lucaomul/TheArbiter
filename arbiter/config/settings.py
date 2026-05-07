@@ -36,6 +36,9 @@ class Settings:
     parallel_critics: bool = True
     critic_timeout_seconds: int = 45
     critic_redundancy_score_band_check: bool = True
+    auditor_rate_limit_retries: int = 0
+    auditor_provider_fallback_enabled: bool = True
+    auditor_request_timeout_seconds: int = 12
     software_team_enabled: bool = True
     software_team_complexity_threshold: int = 3
     software_team_min_complexity_score: int = 3

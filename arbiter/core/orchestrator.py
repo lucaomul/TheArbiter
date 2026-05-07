@@ -83,9 +83,28 @@ class ArbiterOrchestrator:
 
         # ── 2. Audit (optional — skip if already clarified) ───
         if not clarification:
-            audit_result, audit_model = self._run_audit(runner, state.current_task)
+            audit_result, audit_model = self._run_audit(
+                runner,
+                state.current_task,
+                context={
+                    "stable_mode": self.stable_mode,
+                    "allow_provider_fallback": True,
+                },
+            )
             state.track_cost("Auditor", runner.latest_call_cost("Auditor", audit_model))
             state.record_model_usage("Auditor", audit_model, runner.latest_call_metadata("Auditor"))
+            audit_warning = str(audit_result.get("warning", "") or "").strip()
+            if audit_warning:
+                state.add_message("Auditor", audit_warning)
+            audit_debug = {
+                "audit_warning": audit_warning,
+                "audit_provider_limited": bool(audit_result.get("provider_limited", False)),
+                "audit_provider_error": bool(audit_result.get("provider_error", False)),
+                "audit_fallback_used": bool(audit_result.get("fallback_used", False)),
+                "audit_attempted_models": list(audit_result.get("attempted_models", []) or []),
+                "audit_retry_after_seconds": audit_result.get("retry_after_seconds"),
+                "audit_model": audit_model,
+            }
 
             if not audit_result.get("clear", True):
                 # Surface questions to caller — caller decides what to do
@@ -97,6 +116,23 @@ class ArbiterOrchestrator:
                         "needs_clarification": True,
                         "questions": audit_result.get("questions", []),
                         "model_usage": state.model_usage,
+                        **audit_debug,
+                    },
+                    messages=state.messages,
+                    costs=state.costs,
+                    iteration_history=[],
+                )
+
+            if self.max_iter <= 0:
+                return ArbiterResult(
+                    best_solution="",
+                    best_score=0.0,
+                    iteration_count=0,
+                    debug_info={
+                        "needs_clarification": False,
+                        "questions": [],
+                        "model_usage": state.model_usage,
+                        **audit_debug,
                     },
                     messages=state.messages,
                     costs=state.costs,
@@ -116,5 +152,5 @@ class ArbiterOrchestrator:
 
         return engine.execute(state, manual_override=manual_override)
 
-    def _run_audit(self, runner: AgentRunner, task: str) -> tuple[dict, str]:
-        return runner.run_auditor(task)
+    def _run_audit(self, runner: AgentRunner, task: str, context: Optional[dict] = None) -> tuple[dict, str]:
+        return runner.run_auditor(task, context=context)

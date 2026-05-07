@@ -71,6 +71,7 @@ defaults = {
     "audit_round_count": 0,
     "audit_question_history": [],
     "audit_resolution_note": "",
+    "audit_warning_text": "",
     "rewrite_mode":      False,
     "tech_stall_count":  0,
     "score_plateau_count": 0,
@@ -293,6 +294,7 @@ def reset_run_state(keep_task_mode: bool = True):
     st.session_state.audit_round_count = 0
     st.session_state.audit_question_history = []
     st.session_state.audit_resolution_note = ""
+    st.session_state.audit_warning_text = ""
 
 
 def get_available_models_for_role(role: str) -> list:
@@ -1228,11 +1230,15 @@ def render_auditor_surface():
         return
 
     auditor_message = normalize_visible_message(get_latest_message("Auditor"))
+    warning_text = str(st.session_state.audit_warning_text or "").strip()
+    duplicate_warning = bool(warning_text and auditor_message and warning_text == auditor_message)
     if st.session_state.audit_status == "needs_clarification" or st.session_state.pending_questions:
         with st.container(border=True):
             st.subheader("Auditor Intake")
             st.caption("The auditor is asking for more context before the case proceeds.")
-            if auditor_message:
+            if warning_text:
+                st.warning(warning_text)
+            if auditor_message and not duplicate_warning:
                 st.write(auditor_message)
             elif st.session_state.pending_questions:
                 for question in st.session_state.pending_questions:
@@ -1241,10 +1247,17 @@ def render_auditor_surface():
         with st.container(border=True):
             st.subheader("Auditor Intake")
             st.success("The brief is specific enough to proceed.")
+            if warning_text:
+                st.warning(warning_text)
             if st.session_state.audit_resolution_note:
                 st.caption(st.session_state.audit_resolution_note)
             cleaned = str(auditor_message or "").strip().lower()
-            if auditor_message and "specific enough to proceed" not in cleaned and "check passed" not in cleaned:
+            if (
+                auditor_message
+                and not duplicate_warning
+                and "specific enough to proceed" not in cleaned
+                and "check passed" not in cleaned
+            ):
                 st.write(auditor_message)
 
 
@@ -2506,6 +2519,9 @@ elif st.session_state.step == "audit":
     st.session_state.costs = merged_costs
     if result.debug_info.get("model_usage"):
         st.session_state.model_usage = result.debug_info.get("model_usage", [])
+    if result.messages:
+        st.session_state.messages = list(result.messages)
+    st.session_state.audit_warning_text = str(result.debug_info.get("audit_warning", "") or "").strip()
 
     if result.debug_info.get("needs_clarification"):
         questions = sanitize_audit_questions(result.debug_info.get("questions", []), limit=3)

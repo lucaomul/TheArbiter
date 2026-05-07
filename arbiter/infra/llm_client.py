@@ -336,10 +336,13 @@ class LLMClient:
         force_json: bool = False,
         temperature: float = 0.7,
         agent_name: str = "",
+        max_retries: int = 2,
+        max_retry_sleep_seconds: Optional[int] = None,
+        request_timeout_seconds: Optional[int] = None,
     ) -> LLMResult:
         self._set_last_call_metadata({})
         self._last_result = None
-        max_retries = 2
+        retry_limit = max(0, int(max_retries or 0))
         attempt = 0
 
         while True:
@@ -357,15 +360,46 @@ class LLMClient:
             usage = {}
             try:
                 if provider == "openai":
-                    response, usage = self._call_openai(model, system_prompt, user_prompt, force_json, temperature)
+                    response, usage = self._call_openai(
+                        model,
+                        system_prompt,
+                        user_prompt,
+                        force_json,
+                        temperature,
+                        request_timeout_seconds=request_timeout_seconds,
+                    )
                 elif provider == "groq":
-                    response, usage = self._call_groq(model, system_prompt, user_prompt, temperature)
+                    response, usage = self._call_groq(
+                        model,
+                        system_prompt,
+                        user_prompt,
+                        temperature,
+                        request_timeout_seconds=request_timeout_seconds,
+                    )
                 elif provider == "gemini":
-                    response, usage = self._call_gemini(model, system_prompt, user_prompt, temperature)
+                    response, usage = self._call_gemini(
+                        model,
+                        system_prompt,
+                        user_prompt,
+                        temperature,
+                        request_timeout_seconds=request_timeout_seconds,
+                    )
                 elif provider == "ollama":
-                    response, usage = self._call_ollama(model, system_prompt, user_prompt, temperature)
+                    response, usage = self._call_ollama(
+                        model,
+                        system_prompt,
+                        user_prompt,
+                        temperature,
+                        request_timeout_seconds=request_timeout_seconds,
+                    )
                 elif provider == "anthropic":
-                    response, usage = self._call_anthropic(model, system_prompt, user_prompt, temperature)
+                    response, usage = self._call_anthropic(
+                        model,
+                        system_prompt,
+                        user_prompt,
+                        temperature,
+                        request_timeout_seconds=request_timeout_seconds,
+                    )
                 else:
                     raise ValueError(f"Unknown provider: {provider}")
                 result = self._result_from_response(provider, model, response)
@@ -411,8 +445,13 @@ class LLMClient:
                 )
                 return result
 
-            if result.error_type == "rate_limit" and attempt < max_retries:
+            if result.error_type == "rate_limit" and attempt < retry_limit:
                 backoff_seconds = max(1, int(result.retry_after_seconds or (2 ** attempt)))
+                if max_retry_sleep_seconds is not None:
+                    try:
+                        backoff_seconds = min(backoff_seconds, max(0, int(max_retry_sleep_seconds)))
+                    except Exception:
+                        pass
                 logger.warning(
                     "llm_call_retry_scheduled",
                     extra={
@@ -424,7 +463,8 @@ class LLMClient:
                         "error_type": result.error_type,
                     },
                 )
-                time.sleep(backoff_seconds)
+                if backoff_seconds > 0:
+                    time.sleep(backoff_seconds)
                 attempt += 1
                 continue
 
@@ -465,6 +505,9 @@ class LLMClient:
         force_json: bool = False,
         temperature: float = 0.7,
         agent_name: str = "",
+        max_retries: int = 2,
+        max_retry_sleep_seconds: Optional[int] = None,
+        request_timeout_seconds: Optional[int] = None,
     ) -> str:
         return self.generate_result(
             provider=provider,
@@ -474,6 +517,9 @@ class LLMClient:
             force_json=force_json,
             temperature=temperature,
             agent_name=agent_name,
+            max_retries=max_retries,
+            max_retry_sleep_seconds=max_retry_sleep_seconds,
+            request_timeout_seconds=request_timeout_seconds,
         ).text
 
     # ── OpenAI ────────────────────────────────────────────────
@@ -484,6 +530,7 @@ class LLMClient:
         user_prompt: str,
         force_json: bool,
         temperature: float,
+        request_timeout_seconds: Optional[int] = None,
     ) -> tuple[str, dict]:
         client = self._get_openai()
         params = {
@@ -496,6 +543,8 @@ class LLMClient:
         }
         if force_json:
             params["response_format"] = {"type": "json_object"}
+        if request_timeout_seconds is not None:
+            params["timeout"] = max(1, int(request_timeout_seconds))
         response = client.chat.completions.create(**params)
         usage_obj = getattr(response, "usage", None)
         usage = {
@@ -511,16 +560,22 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
+        request_timeout_seconds: Optional[int] = None,
     ) -> tuple[str, dict]:
         client = self._get_groq()
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            params = {
+                "model": model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt},
                 ],
-                temperature=temperature,
+                "temperature": temperature,
+            }
+            if request_timeout_seconds is not None:
+                params["timeout"] = max(1, int(request_timeout_seconds))
+            response = client.chat.completions.create(
+                **params,
             )
             usage_obj = getattr(response, "usage", None)
             usage = {
@@ -548,6 +603,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
+        request_timeout_seconds: Optional[int] = None,
     ) -> tuple[str, dict]:
         api_key = os.getenv("GEMINI_API_KEY")
         clean_model = model.split("/")[-1]
@@ -573,7 +629,7 @@ class LLMClient:
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=45) as response:
+            with request.urlopen(req, timeout=max(1, int(request_timeout_seconds or 45))) as response:
                 res_json = json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -609,6 +665,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
+        request_timeout_seconds: Optional[int] = None,
     ) -> tuple[str, dict]:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
@@ -642,7 +699,7 @@ class LLMClient:
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=60) as response:
+            with request.urlopen(req, timeout=max(1, int(request_timeout_seconds or 60))) as response:
                 res_json = json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -701,6 +758,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float,
+        request_timeout_seconds: Optional[int] = None,
     ) -> tuple[str, dict]:
         clean_model = model.split("ollama:", 1)[-1] if model.startswith("ollama:") else model
         url = f"{self._ollama_base_url}/api/generate"
@@ -720,7 +778,7 @@ class LLMClient:
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=120) as response:
+            with request.urlopen(req, timeout=max(1, int(request_timeout_seconds or 120))) as response:
                 res_json = json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

@@ -11,8 +11,8 @@ It is built for operators who want more than "send prompt, hope for the best."
 
 
 
-This is a simulated walkthrough built from real interface captures and representative product states.
-Live runs can take longer than the GIF suggests depending on task complexity, provider availability, rate limits, evidence size, and whether the larger software team path is activated.
+This walkthrough is captured from the real interface during a live local session.
+Live runs can still take longer than the GIF suggests depending on task complexity, provider availability, rate limits, evidence size, and whether the larger software team path is activated.
 
 The workspace is designed around one job: take a brief, challenge it hard, and make the trust state visible before a user acts on the answer.
 
