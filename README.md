@@ -9,7 +9,9 @@ It is built for operators who want more than "send prompt, hope for the best."
 
 ## Product Tour
 
+![The Arbiter product tour](docs/assets/arbiter-demo.gif)
 
+[Open the full demo GIF directly](https://raw.githubusercontent.com/lucaomul/TheArbiter/main/docs/assets/arbiter-demo.gif)
 
 This walkthrough is captured from the real interface during a live local session.
 Live runs can still take longer than the GIF suggests depending on task complexity, provider availability, rate limits, evidence size, and whether the larger software team path is activated.
